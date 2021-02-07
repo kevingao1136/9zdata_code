@@ -6,7 +6,6 @@ from sklearn.preprocessing import LabelEncoder
 import warnings
 warnings.simplefilter("ignore")
 import matplotlib.pyplot as plt
-# pd.set_option('display.max_columns',None)
 
 def now():
     return pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -125,7 +124,7 @@ def load_data(item_path, train_start, train_end, test_start, test_end):
         train_df: training data including validation data
         test_df: test data
     """
-    df = pd.read_csv(item_path, parse_dates=['day_dt'])
+    df = pd.read_pickle(item_path)
 
     # GET TRAIN DATA AND IMPUTE UNIT PRICE
     train_df = df[df.day_dt.between(train_start, train_end)]
@@ -157,20 +156,22 @@ def train_model(X_train, X_test, y_train, y_test):
     # CatBoost model
     model = CatBoostRegressor(
                             iterations=1000,
+                            # learning_rate=0.1,
                             loss_function='RMSE',
                             # loss_function='Tweedie:variance_power=1.5',
                             eval_metric='RMSE',
-                            verbose=500
+                            verbose=200
                             )
 
     model.fit(train_pool,
             eval_set=val_pool,
+            early_stopping_rounds=300,
             # use_best_model=False
             )
 
     return model
 
-def train_model_w_validation(X, y):
+def retrain_model(X, y, best_iterations, best_learning_rate):
 
     cat_features = ['store_type','activity_desc']
 
@@ -181,12 +182,14 @@ def train_model_w_validation(X, y):
                     )
 
     # CatBoost model
+    #* PARAMETERS DEPEND ON PRIOR MODEL
     model = CatBoostRegressor(
-                            iterations=1000,
+                            iterations=best_iterations,
+                            learning_rate=best_learning_rate,
                             loss_function='RMSE',
                             # loss_function='Tweedie:variance_power=1.5',
                             eval_metric='RMSE',
-                            verbose=500
+                            verbose=100
                             )
 
     model.fit(train_pool)
@@ -200,41 +203,6 @@ def show_results(df):
     print(f"100-120%: {np.mean([1 if r>=1 and r<=1.2 else 0 for r in df.ratio])}")
     print(f"120-inf%: {np.mean([1 if r>=1.2 else 0 for r in df.ratio])}")
     print(f"65-120%: {np.mean([1 if r>=0.65 and r<=1.2 else 0 for r in df.ratio])}")
-
-# def plot_pred_results(item_code, train, val, test, img_path):
-#     '''
-#     Parameters:
-#         train - train dataset, required features: day_dt, ttl_quantity, y_pred, unit_price
-#         val - validation dataset (v1 + v2), required features: day_dt, ttl_quantity, y_pred, unit_price
-#         test - test dataset, required features: day_dt, y_pred, unit_price
-#         img_path - image export path
-#     '''
-
-#     # PLOT AX1 - TTL_QUANTITY & Y_PRED
-#     fig, ax1 = plt.subplots(figsize=(30,12))
-#     ax1.set_ylabel('ttl_quantitiy',fontsize=20)
-#     ax1.plot(train.groupby(['day_dt']).ttl_quantity.sum(),label='train_y_true')
-#     ax1.plot(train.groupby(['day_dt']).y_pred.sum(),label='train_y_pred')
-#     ax1.plot(val.groupby(['day_dt']).ttl_quantity.sum(),label='Validation_y_true',color='y')
-#     ax1.plot(val.groupby(['day_dt']).y_pred.sum(),label='Validation_y_pred',color='r')
-#     ax1.plot(test.groupby(['day_dt']).y_pred.sum(),label='test_y_pred')
-#     ax1.axvline(x=val.day_dt.min(),color='k',ls='--',linewidth=3)
-
-#     # ADD AX2 - UNIT PRICE
-#     ax2=ax1.twinx()
-#     ax2.set_ylabel('unit_price',fontsize=20)
-#     ax2.set_ylim([0,max(train.unit_price.max(),val.unit_price.max(),test.unit_price.max())+5])
-#     ax2.plot(train.groupby(['day_dt']).unit_price.mean(),'--',label='unit_price',color='k')
-#     ax2.plot(val.groupby(['day_dt']).unit_price.mean(),'--',color='k')
-#     ax2.plot(test.groupby(['day_dt']).unit_price.mean(),'--',color='k')
-
-#     fig.legend(fontsize=20, loc=2) # UPPER LEFT
-#     plt.title(f"PREDICTION RESULTS FOR ITEM {item_code}",size=20)
-#     plt.setp(ax1.get_xticklabels(),fontsize=15)
-#     plt.setp(ax1.get_yticklabels(),fontsize=15)
-#     fig.tight_layout()
-#     plt.grid()
-#     plt.savefig(img_path)
 
 def plot_pred_results(item_code, train, val, test, img_path):
     '''
@@ -276,6 +244,7 @@ def plot_pred_results(item_code, train, val, test, img_path):
     val_store_cnt, = par2.plot(val.groupby(['day_dt']).store_id.nunique(),'--',color='m')
     test_store_cnt, = par2.plot(test.groupby(['day_dt']).store_id.nunique(),'--',color='m')
     host.axvline(x=val.day_dt.min(),color='k',ls='--',linewidth=3)
+    host.grid()
 
     # SET Y LIMITS
     par1.set_ylim([0,max(train.unit_price.max(),val.unit_price.max(),test.unit_price.max())+5])
@@ -293,7 +262,7 @@ def plot_pred_results(item_code, train, val, test, img_path):
     host.legend(lines, [l.get_label() for l in lines])
 
     # EXPORT IMAGE
-    plt.savefig(img_path)
+    plt.savefig(f"{img_path}{item_code}.png")
 
 def export_results(item_code, train, val1, val2, test):
     '''
@@ -332,7 +301,7 @@ def export_results(item_code, train, val1, val2, test):
     result_data = result_data[['model_id','item_code','store_id','day_dt','ttl_quantity','y_pred','istest']]
     result_data = result_data[result_data.istest==1]
     assert result_data.istest.sum() > 0, "NO TEST RESULT DATA!"
-    result_data.to_csv(result_data_path,index=False)
+    result_data.to_csv(f"{result_data_path}{item_code}_A5_result_data.csv",index=False)
 
     # CREATE META DATA --------------------------------------------------------------------------------------------------------------------
     # CREATE META DATA DICT
@@ -388,41 +357,44 @@ def export_results(item_code, train, val1, val2, test):
                 'img_path','v1_start_time','v1_end_time','v1_accuracy','v1_sell_thru',
                 'v2_start_time','v2_end_time','v2_accuracy','v2_sell_thru','package','test_store_cnt']
     meta_data = meta_data[meta_cols]
-    meta_data.to_csv(meta_path,index=False)
+    meta_data = pd.concat([meta_data]*4, ignore_index=True)
+    meta_data['test_start_time'] = ['2021-03-18','2021-04-15','2021-05-13','2021-06-03']
+    meta_data['test_end_time'] = ['2021-04-14','2021-05-12','2021-06-02','2021-06-30']
+    meta_data.to_csv(f"{meta_path}{item_code}_A5_meta_data.csv",index=False)
+
+#* DEFINE PATHS
+data_path = f"/app2/kevin_workspace/data0304/"
+img_path = f"/app/python-scripts/kevin_workspace/"
+log_path = f"/app/python-scripts/kevin_workspace/"
+result_data_path = f"/app/python-scripts/kevin_workspace/"
+meta_path = f"/app/python-scripts/kevin_workspace/"
+
+#* SET DATES
+train_val_start, train_val_end ='2019-01-01', '2021-03-18'
+test_start, test_end ='2021-03-18', '2021-06-30'
+v1_start, v1_end = '2020-12-16', '2021-01-07'
+v2_start, v2_end = '2021-01-08', '2021-01-27'
 
 #* DEFINE ITEM LIST
-item_list = [i[:-4] for i in os.listdir(f"/app2/kevin_workspace/data03180414/")]
-item_list = [item_list[0]]
+item_list = [i[:-3] for i in os.listdir(data_path)]
 print(f"TRAIN MODEL FOR {len(item_list)} ITEMS, ITEM LIST: {item_list}")
 
 # Load needed data to add new features
 unit_price = pd.read_csv('../data/scai_unit_pricefromsales.csv', sep = '|', parse_dates=['day_dt'])
-lunar = pd.read_csv('lunar_days.csv', parse_dates=['day_dt'], usecols=['day_dt','dis_spring'])
-prom_schedule = pd.read_csv('schedule.csv',parse_dates=['day_dt'])
+unit_price.area_idnt = unit_price.area_idnt.astype(object)
+lunar = pd.read_csv('assist_data/lunar_days.csv', parse_dates=['day_dt'], usecols=['day_dt','dis_spring'])
+prom_schedule = pd.read_csv('assist_data/schedule.csv',parse_dates=['day_dt'])
 prom_schedule.fillna(0, inplace=True)
 
 # Loop through each item
 for item in item_list:
 
-    #* DEFINE PATHS
-    data_path = f"/app2/kevin_workspace/data03180414/"
-    img_path = f"/app/python-scripts/kevin_workspace/output_0304/train_img/{item}test.png"
-    log_path = f"/app/python-scripts/kevin_workspace/output_0304/log/train_modeltest.log"
-    result_data_path = f"/app/python-scripts/kevin_workspace/output_0304/result_data/{item}_A5_result_datatest.csv"
-    meta_path = f"/app/python-scripts/kevin_workspace/output_0304/meta_data/{item}_A5_meta_datatest.csv"
-
-    #* SET DATES
-    train_start, train_end ='2019-01-01', '2021-03-18'
-    test_start, test_end ='2021-03-18', '2021-06-30'
-    v1_start, v1_end = '2020-12-16', '2021-01-07'
-    v2_start, v2_end = '2021-01-08', '2021-01-27'
-
     try:
         print(f"______________________________________________________________________________________________________________")
         print(f"ITEM {item} STARTING AT {now()}, PROCESS: {item_list.index(item)+1} OUT OF {len(item_list)}")
-        print(f"Loading data...")
-        raw_train_df, raw_test_df = load_data(f"{data_path}{item}.csv", 
-            train_start=train_start, train_end=train_end, test_start=test_start, test_end=test_end)
+        print(f"Loading data from {data_path}")
+        raw_train_df, raw_test_df = load_data(f"{data_path}{item}.pk", 
+            train_start=train_val_start, train_end=train_val_end, test_start=test_start, test_end=test_end)
 
         # print(f"raw_train_df has features: {list(raw_train_df.columns)}")
 
@@ -432,7 +404,7 @@ for item in item_list:
 
         # IF EMPTY, CONTINUE WITH NEXT ITEM
         try:
-            assert len(raw_train_df) > 0, "EMPTY TRAIN DATA"
+            assert len(raw_train_df[raw_train_df.day_dt < v1_start]) > 0, "EMPTY TRAIN DATA" # IF TRAIN DATASET BEFORE V1 IS EMPTY
             assert len(raw_test_df) > 0, "EMPTY TEST DATA"
         except AssertionError as error:
             print(f"item {item} has error: {error}") 
@@ -482,13 +454,13 @@ for item in item_list:
         test_df = label_encoder(test_df)
 
         # SPLIT TRAIN DATA INTO TRAIN AND VALIDATION
-        train_start, train_end, val_start, val_end = train_start, v1_start, v1_start, v2_end
+        train_start, train_end, val_start, val_end = train_val_start, v1_start, v1_start, v2_end
         train_index = train_df[train_df.day_dt.between(train_start, train_end)].index
         val_index = train_df[train_df.day_dt.between(val_start, val_end)].index
 
         # Define X and y
         X = train_df[X_features]
-        X['year'] = X['year'].apply(lambda x: 2020 if x == 2021 else x) #* CHANGE 2021 TO 2020
+        X['year'] = X['year'].apply(lambda x: 2020 if x == 2021 else x)
         y = train_df[y_feature[0]]
         X_train, X_test, y_train, y_test = X.loc[train_index], X.loc[val_index], y.loc[train_index], y.loc[val_index]
 
@@ -511,22 +483,22 @@ for item in item_list:
         show_results(item_wh)
         print(item_wh)
 
-        if val_passed >= 0: # IF 75% SELL THRU BETWEEN 65% AND 120%
+        if val_passed >= 0.75: #* IF 75% SELL THRU BETWEEN 65% AND 120%
 
             print(f"ITEM PASSED!!!")
-            if test_df.duplicated().any() == True:
+            if test_df.duplicated().any() == True: # CHECK DUPLICATES IN TEST DATA
                 print("DUPLICATED DATA IN TEST DATA...REMOVED")
             test_df = test_df.drop_duplicates()
             
             # ADD VALIDATION DATASET INTO TRAINING
             print(f"TRAINING NEW MODEL WITH ADDED VALIDATION DATA...")
-            model = train_model_w_validation(X=X, y=y)
+            retrained_model = retrain_model(X=X, y=y, best_iterations=model.tree_count_, best_learning_rate=model.learning_rate_)
 
             # PREDICT ON TEST DATASET
             print(f"PREDICTING ON TEST DATA...")
             test_X = test_df[X_features]
-            test_X['year'] = test_X.year.apply(lambda x: 2020 if x == 2021 else x) #* CHANGE 2021 TO 2020
-            test_df['y_pred'] = [round(x,4) for x in model.predict(test_X)]
+            test_X['year'] = test_X.year.apply(lambda x: 2020 if x == 2021 else x)
+            test_df['y_pred'] = [round(x,4) for x in retrained_model.predict(test_X)]
 
             print(f"PREDICTION RESULTS:")
             pred_results = test_df.groupby('day_dt').agg({'ttl_quantity':'sum', 'y_pred':'sum', 'unit_price':'mean'})
