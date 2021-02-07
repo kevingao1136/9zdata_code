@@ -3,13 +3,8 @@ import pandas as pd
 import numpy as np
 from impala.dbapi import connect
 from impala.util import as_pandas
-from datetime import timedelta
 import warnings
-import math
 warnings.simplefilter("ignore")
-
-export_path = '/app2/kevin_workspace/data03180414/'
-# export_path = ''
 
 def now(): 
     return pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -111,11 +106,21 @@ def get_datefeature_prominfo():
     date_feature, _ = reduce_mem_usage(date_feature)
 
     # Reduce prom_info
-    prom_path = '../data/ods_bo_dim_prmt.csv'
-    prom_info = pd.read_csv(prom_path)
-    prom_info = prom_info[['item', 'offer_code', 'offer_start_date', 'offer_end_date', 
+    prom_info = pd.read_csv('assist_data/prom_data.csv')
+
+    prom_info.rename({'label_001':'x件y折',
+                    'label_002':'x元y件',
+                    'label_003':'加x元多y件',
+                    'label_004':'买x送y',
+                    'label_005':'满x减y',
+                    'label_006':'x件减y',
+                    'label_007':'第x件y折',
+                    'label_008':'换购'
+                    },axis=1,inplace=True)
+
+    prom_info = prom_info[['item', 'offer_code', 'offer_start_date', 'offer_end_date',
                         'osd_type', 'outputs', 'x件y折', 'x元y件', '加x元多y件', '买x送y', '满x减y',
-                        'x件减y', '第x件y折', '换购', 'is_vip', 'free_gift', 'unit_price', 
+                        'x件减y', '第x件y折', '换购', 'is_vip', 'free_gift', 'unit_price',
                         'required_num', 'amount', 'prom_price', 'retail_price','flag']]
     prom_info['offer_start_date'] = pd.to_datetime(prom_info['offer_start_date'], errors='coerce')
     prom_info['offer_end_date'] = pd.to_datetime(prom_info['offer_end_date'], errors='coerce')
@@ -139,7 +144,7 @@ def gen_pog_and_date(item, date_feature):
 
     ####################### TEST DATA #######################
     item_code_df = pd.DataFrame(data=[item], columns=['item_code'])
-    test_data = pd.read_csv('test_sample.csv') # TEST PERIOD AND ALL STORE ID
+    test_data = pd.read_csv('assist_data/test_sample.csv') # TEST PERIOD AND ALL STORE ID
     cross_join_prom = cartesian_product_basic(item_code_df, test_data)
     cross_join_prom['day_dt'] = pd.to_datetime(cross_join_prom['day_dt'])
     test_data = pd.merge(cross_join_prom, date_feature, on='day_dt', how='left')
@@ -189,11 +194,11 @@ def get_store_info():
 
 def get_outlier(df,store,item,work_day,quantity):
     
-    start_dt = work_day-timedelta(days=7)
-    end_dt = work_day+timedelta(days=7)
+    start_dt = work_day - pd.Timedelta(days=7)
+    end_dt = work_day + pd.Timedelta(days=7)
     tmp = df[(df.store_id==store)&(df.item_code==item)&(df.day_dt>=start_dt)&(df.day_dt<=end_dt)&(df.ttl_quantity<=200)]
     all_quantity = tmp.ttl_quantity.sum()
-    if quantity/all_quantity>1:
+    if quantity / all_quantity > 1:
         return all_quantity/len(tmp)
     else:
         return quantity
@@ -211,7 +216,7 @@ def getsaletable(item):
         return data
     else:
         outlier_df['sale_qty2'] = outlier_df.apply(lambda x:get_outlier(data,x.store_id,x.item_code,x.day_dt,x.ttl_quantity),axis=1)
-        outlier_df['sale_qty2'] = outlier_df['sale_qty2'].fillna(0.0).apply(lambda x:math.ceil(x))
+        outlier_df['sale_qty2'] = outlier_df['sale_qty2'].fillna(0.0).apply(lambda x:int(np.ceil(x)))
         outlier_df = outlier_df.drop(['ttl_quantity','avg_amountofsales','ttl_amt_payment'],axis=1)
         data = pd.merge(data,outlier_df,how='left',on=['store_id','day_dt','item_code'])
         data['sale_qty2'] = data['sale_qty2'].fillna(data['ttl_quantity'])
@@ -223,11 +228,10 @@ def getsaletable(item):
 
 def get_prom(data, prom_info):
     """
-    :parameter  day_dt datetime64
     """
     item = int(data['item_code'].unique()[0])
     prom_info = prom_info[prom_info['item'] == item]
-    time_range = pd.date_range('2018-04-01', '2021-05-31')
+    time_range = pd.date_range('2019-01-01', '2021-06-30')
     time_merge = pd.DataFrame()
     time_merge['day_dt'] = time_range
 
@@ -241,7 +245,7 @@ def get_prom(data, prom_info):
     cross_join_prom = cross_join_prom.sort_values(['item', 'day_dt', 'unit_price'])
     cross_join_prom = cross_join_prom.groupby(['day_dt', 'item']).first().reset_index()
 
-    data = pd.merge(data, cross_join_prom, right_on=['day_dt', 'item'], left_on=['day_dt', 'item_code'], how='left')
+    data = data.merge(cross_join_prom, left_on=['day_dt', 'item_code'], right_on=['day_dt', 'item'], how='left')
 
     # todo: merge store
     offer_list = data['offer_code'].dropna().unique().astype(float).astype(int).astype(str).tolist()
@@ -283,28 +287,11 @@ def get_prom(data, prom_info):
 
     return data
 
-def get_item_list(item_class):
-
-    temp = pd.read_csv('../data/new_top500_20201217.csv',sep='|')
-    all_item_list = []
-
-    for class_list in item_class:
-        
-        grp_desc = class_list[0]
-        dept_desc = class_list[1]
-        class_desc = class_list[2]
-        sbclass_desc = class_list[3]
-
-        item_list = temp[(temp.grp_desc == grp_desc) &
-                    (temp.dept_desc == dept_desc) &
-                    (temp.class_desc == class_desc) &
-                    (temp.sbclass_desc == sbclass_desc)].prd_id.values
-        
-        all_item_list += list(item_list)
-
-    return all_item_list
-
 def main():
+
+    # DEFINE EXPORT PATH
+    export_path = '/app2/kevin_workspace/data0304/'
+    # export_path = './'
 
     # LOAD date_feature, prom_info
     date_feature, prom_info = get_datefeature_prominfo()
@@ -312,7 +299,8 @@ def main():
     # GET ITEM LIST
     data = impala_query(f"select distinct item_code from scai.0318_0414_item_sales")
     item_list = list(data.item_code)
-    exported = [i[:-4] for i in os.listdir('/app2/kevin_workspace/data03180414')]
+    # item_list = item_list[2000:2500]
+    exported = [i[:-3] for i in os.listdir('/app2/kevin_workspace/data0304')]
     item_list = [i for i in item_list if i not in exported]
 
     print(f"START ETL FOR {len(item_list)} ITEMS, ITEM LIST: {item_list} AT {now()}")
@@ -323,24 +311,24 @@ def main():
             print(f"IMPORTING ITEM {item} AT {now()}, PROCESS: {item_list.index(item)+1} OUT OF {len(item_list)}")
 
             # Load data
-            print(f"Loading POG data...")
+            print(f"Loading POG data at {now()}...")
             pog_df = gen_pog_and_date(item, date_feature)
-            print(f"Loading store data...")
+            print(f"Loading store data at {now()}...")
             store_df = get_store_info()
-            print(f"Loading sales data...")
+            print(f"Loading sales data at {now()}...")
             sales_df = getsaletable(item)
 
             # Merge data
-            print(f"Merging POG, store and sales data...")
+            print(f"Merging POG, store and sales data at {now()}...")
             df = pog_df.merge(store_df,on='store_id',how='inner')
             df = df.merge(sales_df,on=['item_code','store_id','day_dt'],how='left')
-            print(f"Merging promotions data...")
-            res_df = get_prom(df, prom_info)
+            print(f"Merging promotions data at {now()}...")
+            res_df = get_prom(data=df, prom_info=prom_info)
 
             # Export data
             print(f"THE RESULT DATA HAS {len(res_df)} ROWS")
-            print(f"Exporting {item}...")
-            res_df.to_pickle(f"{export_path}{item}.pk",index=False)
+            print(f"Exporting {item} at {now()}...")
+            res_df.to_pickle(f"{export_path}{item}.pk")
             print(f"exported to {export_path} at {now()}")
 
         except Exception as error:
