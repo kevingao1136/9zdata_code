@@ -1,3 +1,4 @@
+import os
 import time
 import pandas as pd
 import numpy as np
@@ -256,6 +257,13 @@ def getsaletable(item, path):
 
 def get_prom(item, data, prom_info, date_range):
     """
+    Parameters:
+        item: item code (string)
+        data: merged data from previous steps
+        prom_info: prom_info data
+        date_range: 2 dates for date range (tuple)
+    Returns:
+        data: data with promotion information merged to it
     """
     # GET PROM INFO
     prom_info = prom_info[prom_info['item'] == int(item)]
@@ -268,7 +276,7 @@ def get_prom(item, data, prom_info, date_range):
     cross_join_prom = cross_join_prom[(cross_join_prom['day_dt'] >= cross_join_prom['offer_start_date']) & (
             cross_join_prom['day_dt'] <= cross_join_prom['offer_end_date'])]
 
-    # CLEAN DATA
+    # REMOVE DUPLICATE UNIT PRICES - TAKE THE SMALLEST
     cross_join_prom['p_rate'] = 1 - cross_join_prom['unit_price'] / cross_join_prom['retail_price']
     cross_join_prom.loc[cross_join_prom['p_rate'] < 0, 'p_rate'] = 0
     cross_join_prom = cross_join_prom.sort_values(['item', 'day_dt', 'unit_price'])
@@ -276,40 +284,14 @@ def get_prom(item, data, prom_info, date_range):
     cross_join_prom['day_dt'] = pd.to_datetime(cross_join_prom['day_dt'], errors='coerce')
     cross_join_prom['item'] = cross_join_prom['item'].astype(int)
 
-    # print(cross_join_prom[['day_dt','item']].dtypes)
-    # print(data[['day_dt','item_code']].dtypes)
-
+    # MERGE CROSS JOIN PROM AND DATA
     data = data.merge(cross_join_prom, left_on=['day_dt', 'item_code'], right_on=['day_dt', 'item'], how='left')
-    #: merge store
-    # offer_list = data['offer_code'].dropna().unique().astype(float).astype(int).astype(str).tolist()
-    # if len(offer_list) == 0:
-    #     offer_list = ['00000000']
-    # offers_text = ','.join(offer_list)
-    # loc_data = impala_query(f"select * from ods_sc.ods_bo_dim_prmt_pp_pkgloc where offer_code in ({str(offers_text)})")
-    # loc_data['offer_code'] = loc_data['offer_code'].astype(str)
-    # data['offer_code'] = data['offer_code'].astype(str)
-    # loc_data['store'] = loc_data['store'].astype(int)
-    # data['store_id'] = data['store_id'].astype(int)
-    # data = pd.merge(data, loc_data, left_on=['offer_code', 'store_id'], right_on=['offer_code', 'store'],
-    #                 how='left')
-    # prom_cols = ['offer_code', 'offer_start_date', 'offer_end_date', 'osd_type',
-    #              'outputs', 'x件y折', 'x元y件', '加x元多y件', '买x送y', '满x减y', 'x件减y', '第x件y折',
-    #              '换购', 'is_vip', 'free_gift', 'unit_price', 'required_num', 'amount',
-    #              'prom_price', 'retail_price', 'flag', 'p_rate']
-    # data.loc[data['package'].isna(), prom_cols] = np.nan
-    data = data.drop(
-        ['item',
-        #  'store', 'last_update_id', 'last_update_datetime', 'etl_update_time', 'package'
-         ], axis=1)
+    data = data.drop(['item','offer_start_date', 'offer_end_date','outputs'], axis=1)
 
-    tmp = data[['item_code', 'retail_price']].drop_duplicates().dropna()
-    d = dict(zip(tmp['item_code'], tmp['retail_price']))
-    data['retail_price'] = data['item_code'].map(d)
-
+    # IMPUTE DATA
     data['retail_price'] = data['retail_price'].fillna(data['retail_price'].median())
     prom_types = ['x件y折', 'x元y件', '加x元多y件', '买x送y', '满x减y', 'x件减y', '第x件y折', '换购', 'is_vip', 'free_gift']
     data[prom_types] = data[prom_types].fillna(0)
-
     data['required_num'] = data['required_num'].fillna(1)
     data['p_rate'] = data['p_rate'].fillna(0)
     data.loc[data['amount'].isna(), 'amount'] = data.loc[data['amount'].isna(), 'retail_price']
@@ -333,7 +315,7 @@ def main(item):
     print(f"Loading store data at {now()}...")
     store_df = get_store_info(path='ods_sc.dim_organization')
 
-    print(f"Loading product data at {now()}")
+    print(f"Loading product data at {now()}...")
     product_df = get_product_info(path='ods_sc.dim_product')
 
     print(f"Loading sales data at {now()}...")
@@ -358,15 +340,14 @@ def main(item):
 if __name__ == '__main__':
 
     #* DEFINE EXPORT PATH
-    export_path = '/app2/kevin_workspace/sbclass_test/'
+    export_path = '/app2/kevin_workspace/NA/'
     # export_path = './'
 
     #* GET ITEM LIST
-    # data = impala_query(f"select distinct item_code from scai.0318_0414_item_sales")
-    # item_list = list(data.item_code)
-    item_list = ['101090412', '101012912', '101037418', '101055714', '101139609']
-    # exported = [i[:-3] for i in os.listdir('/app2/kevin_workspace/data0304')]
-    # item_list = [i for i in item_list if i not in exported]
+    data = impala_query(f"select distinct item_code from scai.0318_0414_item_sales")
+    item_list = list(data.item_code)
+    exported = [i[:-3] for i in os.listdir('/app2/kevin_workspace/data0304')]
+    item_list = [i for i in item_list if i not in exported]
 
     # LOAD date_feature, prom_info
     date_feature, prom_info = get_datefeature(path='../data/date_feature.csv'), get_prominfo(path='assist_data/prom_data.csv')
@@ -383,7 +364,7 @@ if __name__ == '__main__':
         
         try:
             main(item)
-        except Exception:
+        except:
             traceback.print_exc()
             continue
 
