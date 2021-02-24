@@ -336,18 +336,17 @@ def main(item):
     res_df.to_pickle(f"{export_path}{item}.pk")
     print(f"exported to {export_path} at {now()}")
 
-
 if __name__ == '__main__':
 
     #* DEFINE EXPORT PATH
-    export_path = '/app2/kevin_workspace/NA/'
-    # export_path = './'
+    # export_path = '/app2/kevin_workspace/NA/'
+    export_path = './'
 
     #* GET ITEM LIST
     data = impala_query(f"select distinct item_code from scai.0318_0414_item_sales")
-    item_list = list(data.item_code)
-    exported = [i[:-3] for i in os.listdir('/app2/kevin_workspace/data0304')]
-    item_list = [i for i in item_list if i not in exported]
+    item_list = list(data.item_code)[:2]
+    # exported = [i[:-3] for i in os.listdir('/app2/kevin_workspace/data0304')]
+    # item_list = [i for i in item_list if i not in exported]
 
     # LOAD date_feature, prom_info
     date_feature, prom_info = get_datefeature(path='../data/date_feature.csv'), get_prominfo(path='assist_data/prom_data.csv')
@@ -369,3 +368,16 @@ if __name__ == '__main__':
             continue
 
     print(f"IMPORT COMPLETED AT {now()}")
+
+# df = impala_query("""
+# select a.wk_idnt,
+#         count(distinct loc_idnt) store_cnt
+# from ods_sc.dim_pog_loc_hist a 
+# join ods_sc. dim_pog_prod_hist b 
+# on a.key_id = b.key_id and a.wk_idnt = b.wk_idnt
+# where item_idnt = '100659714'
+# group by 1
+# order by 1
+# """)
+
+# print(df[df.wk_idnt > 202101].store_cnt.describe())
