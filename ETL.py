@@ -1,21 +1,28 @@
 import os
 import time
+from numpy.core.fromnumeric import trace
 import pandas as pd
 import numpy as np
 from impala.dbapi import connect
 from impala.util import as_pandas
 import traceback
 import warnings
+import logging
+from multiprocessing import Pool
 warnings.simplefilter("ignore")
 
-def timefunc(func):
-    def inner(*args, **kwargs):
-        start = time.time()
-        result = func(*args,**kwargs)
-        end = time.time()
-        print(f"RUN TIME: {round((end - start),4) / 60} MINUTES")
-        return result
-    return inner
+def custom_logger(log_file):
+
+    logger = logging.getLogger(log_file)
+    logger.setLevel(logging.CRITICAL)
+    format = '%(message)s'
+    log_format = logging.Formatter(format)
+
+    # ADD FILE HANDLER
+    file_handler = logging.FileHandler(log_file, mode='w')
+    file_handler.setFormatter(log_format)
+    logger.addHandler(file_handler)
+    return logger
 
 def now(): 
     return pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -203,7 +210,7 @@ def get_store_info(path):
 
     store_info['store_id'] = store_info['store_id'].apply(pd.to_numeric)
     if store_info['store_id'].duplicated().any() == True:
-        print(f"ALERT>>>>>>>>>>>>>>DUPLICATED STORE_ID")
+        log(f"ALERT>>>>>>>>>>>>>>DUPLICATED STORE_ID")
 
     return store_info
 
@@ -251,7 +258,7 @@ def getsaletable(item, path):
         data['sale_qty2'] = data['sale_qty2'].fillna(data['ttl_quantity'])
         data = data.drop(['ttl_quantity'],axis=1).rename({'sale_qty2':'ttl_quantity'},axis=1)
         if data[['store_id','item_code','day_dt']].duplicated().any() == True:
-            print(f"ALERT>>>>>>>>>>>>>>> DUPLICATES!!!")
+            log(f"ALERT>>>>>>>>>>>>>>> DUPLICATES!!!")
         
         return data
 
@@ -266,6 +273,7 @@ def get_prom(item, data, prom_info, date_range):
         data: data with promotion information merged to it
     """
     # GET PROM INFO
+    assert int(item) in list(prom_info.item.unique()), "ITEM NOT IN PROM_INFO DATA"
     prom_info = prom_info[prom_info['item'] == int(item)]
 
     # CREATE TIME RANGE DATAFRAME FOR CROSS JOIN
@@ -284,6 +292,9 @@ def get_prom(item, data, prom_info, date_range):
     cross_join_prom['day_dt'] = pd.to_datetime(cross_join_prom['day_dt'], errors='coerce')
     cross_join_prom['item'] = cross_join_prom['item'].astype(int)
 
+    # print(data[['day_dt','item_code']].dtypes)
+    # print(cross_join_prom[['day_dt','item']].dtypes)
+    
     # MERGE CROSS JOIN PROM AND DATA
     data = data.merge(cross_join_prom, left_on=['day_dt', 'item_code'], right_on=['day_dt', 'item'], how='left')
     data = data.drop(['item','offer_start_date', 'offer_end_date','outputs'], axis=1)
@@ -297,50 +308,54 @@ def get_prom(item, data, prom_info, date_range):
     data.loc[data['amount'].isna(), 'amount'] = data.loc[data['amount'].isna(), 'retail_price']
     data.loc[data['prom_price'].isna(), 'prom_price'] = data.loc[data['prom_price'].isna(), 'retail_price']
     data.loc[data['unit_price'].isna(), 'unit_price'] = data.loc[data['unit_price'].isna(), 'prom_price']
+    assert data.unit_price.isna().mean() != 1, "UNIT PRICE IS NULL, GET PROM NOT MERGED CORRECTLY."
     if data.duplicated().any() == True:
-        print(f"ALERT>>>>>>>>>>>>>>>> DUPLICATES!!!")
+        log(f"ALERT>>>>>>>>>>>>>>>> DUPLICATES!!!")
 
     return data
 
-@timefunc
+# @timefunc
 def main(item):
 
-    # Load data
-    print(f"Loading POG data at {now()}...")
-    pog_df = gen_pog_and_date(item=item,
-                            date_feature=date_feature,
-                            pog_path='scai.0318_0414_pog',
-                            test_path='assist_data/test_sample.csv')
+    logger = custom_logger(f"{log_path}{item}.log")
+    global log
+    log = logger.critical
 
-    print(f"Loading store data at {now()}...")
-    store_df = get_store_info(path='ods_sc.dim_organization')
+    try:
+        # Load data
+        log(f"IMPORTING ITEM {item} AT {now()}")
+        log(f"Loading POG data...")
+        pog_df = gen_pog_and_date(item=item,
+                                date_feature=date_feature,
+                                pog_path='scai.0318_0414_pog',
+                                test_path='assist_data/test_sample.csv')
 
-    print(f"Loading product data at {now()}...")
-    product_df = get_product_info(path='ods_sc.dim_product')
+        log(f"Loading sales data...")
+        sales_df = getsaletable(item=item, path='scai.0318_0414_item_sales')
 
-    print(f"Loading sales data at {now()}...")
-    sales_df = getsaletable(item=item, path='scai.0318_0414_item_sales')
+        log(f"Merging POG, store, product, and sales data...")
+        df = pog_df.merge(store_df,on='store_id',how='inner')
+        df = df.merge(sales_df,on=['item_code','store_id','day_dt'],how='left')
+        df = df.merge(product_df,on=['item_code'],how='left')
 
-    print(f"Merging POG, store, product, and sales data at {now()}...")
-    df = pog_df.merge(store_df,on='store_id',how='inner')
-    df = df.merge(sales_df,on=['item_code','store_id','day_dt'],how='left')
-    df = df.merge(product_df,on=['item_code'],how='left')
+        log(f"Merging promotions data...")
+        res_df = get_prom(item=item, data=df, prom_info=prom_info, date_range=('2019-01-01', '2021-06-30'))
 
-    print(f"Merging promotions data at {now()}...")
-    res_df = get_prom(item=item, data=df, prom_info=prom_info, date_range=('2019-01-01', '2021-06-30'))
-    assert res_df.unit_price.isna().mean() != 1, "UNIT PRICE IS NULL, GET PROM NOT MERGED CORRECTLY."
+        # Export data
+        log(f"THE RESULT DATA HAS {len(res_df)} ROWS")
+        log(f"Exporting {item} at {now()}...")
+        res_df.to_pickle(f"{export_path}{item}.pk")
+        log(f"exported to {export_path} at {now()}")
 
-    # Export data
-    print(f"THE RESULT DATA HAS {len(res_df)} ROWS")
-    print(f"Exporting {item} at {now()}...")
-    res_df.to_pickle(f"{export_path}{item}.pk")
-    print(f"exported to {export_path} at {now()}")
+    except Exception as error:
+        log(error, exc_info=True)
 
 if __name__ == '__main__':
 
     #* DEFINE EXPORT PATH
-    # export_path = '/app2/kevin_workspace/NA/'
+    # export_path = '/app/python-scripts/kevin_workspace/'
     export_path = './'
+    log_path = './'
 
     #* GET ITEM LIST
     data = impala_query(f"select distinct item_code from scai.0318_0414_item_sales")
@@ -348,36 +363,22 @@ if __name__ == '__main__':
     # exported = [i[:-3] for i in os.listdir('/app2/kevin_workspace/data0304')]
     # item_list = [i for i in item_list if i not in exported]
 
-    # LOAD date_feature, prom_info
-    date_feature, prom_info = get_datefeature(path='../data/date_feature.csv'), get_prominfo(path='assist_data/prom_data.csv')
+    # LOAD FIXED DATA
+    print(f"Loading date_feature, prom_info, store_df, product_df at {now()}")
+    date_feature, prom_info = get_datefeature(path='/app/python-scripts/data/date_feature.csv'), get_prominfo(path='/app/python-scripts/kevin_workspace/assist_data/prom_info.csv')
+    store_df = get_store_info(path='ods_sc.dim_organization')
+    product_df = get_product_info(path='ods_sc.dim_product')
+
+    # log(f"COMMON ITEMS: {list(set(item_list) & set(prom_info.item.unique()))}")
 
     # MAKE IT A LIST OF STRINGS
     item_list = [str(item) for item in item_list]
     print(f"START ETL FOR {len(item_list)} ITEMS, ITEM LIST: {item_list} AT {now()}")
 
-    # MAJOR FOR LOOP
-    for item in item_list:
-
-        print(f"__________________________________________________________________________________________________")
-        print(f"IMPORTING ITEM {item} AT {now()}, PROCESS: {item_list.index(item)+1} OUT OF {len(item_list)}")
-        
-        try:
-            main(item)
-        except:
-            traceback.print_exc()
-            continue
+    #* RUN MAIN FUNCTION WITH POOL
+    pool = Pool(16)
+    pool.map(main, item_list)
+    pool.close()
+    pool.join()
 
     print(f"IMPORT COMPLETED AT {now()}")
-
-# df = impala_query("""
-# select a.wk_idnt,
-#         count(distinct loc_idnt) store_cnt
-# from ods_sc.dim_pog_loc_hist a 
-# join ods_sc. dim_pog_prod_hist b 
-# on a.key_id = b.key_id and a.wk_idnt = b.wk_idnt
-# where item_idnt = '100659714'
-# group by 1
-# order by 1
-# """)
-
-# print(df[df.wk_idnt > 202101].store_cnt.describe())
