@@ -1,4 +1,5 @@
 import os
+import contextlib
 from multiprocessing import Pool
 import logging
 import pandas as pd
@@ -315,39 +316,36 @@ def get_prom(item, data, prom_info, date_range):
 
 # @timefunc
 def main(item):
+    
+    with open(f"{log_path}{item}.log", "w") as train_log, contextlib.redirect_stdout(train_log), contextlib.redirect_stderr(train_log):
+        try:
+            # Load data
+            log(f"IMPORTING ITEM {item} AT {now()}")
+            log(f"Loading POG data...")
+            pog_df = gen_pog_and_date(item=item,
+                                    date_feature=date_feature,
+                                    pog_path='scai.0318_0414_pog',
+                                    test_path='/app/python-scripts/kevin_workspace/assist_data/test_sample.csv')
 
-    logger = custom_logger(f"{log_path}{item}.log")
-    global log
-    log = logger.critical
+            log(f"Loading sales data...")
+            sales_df = getsaletable(item=item, path='scai.0318_0414_item_sales')
 
-    try:
-        # Load data
-        log(f"IMPORTING ITEM {item} AT {now()}")
-        log(f"Loading POG data...")
-        pog_df = gen_pog_and_date(item=item,
-                                date_feature=date_feature,
-                                pog_path='scai.0318_0414_pog',
-                                test_path='/app/python-scripts/kevin_workspace/assist_data/test_sample.csv')
+            log(f"Merging POG, store, product, and sales data...")
+            df = pog_df.merge(store_df,on='store_id',how='inner')
+            df = df.merge(sales_df,on=['item_code','store_id','day_dt'],how='left')
+            df = df.merge(product_df,on=['item_code'],how='left')
 
-        log(f"Loading sales data...")
-        sales_df = getsaletable(item=item, path='scai.0318_0414_item_sales')
+            # log(f"Merging promotions data at {now()}...")
+            # res_df = get_prom(item=item, data=df, prom_info=prom_info, date_range=('2019-01-01', '2021-06-30'))
 
-        log(f"Merging POG, store, product, and sales data...")
-        df = pog_df.merge(store_df,on='store_id',how='inner')
-        df = df.merge(sales_df,on=['item_code','store_id','day_dt'],how='left')
-        df = df.merge(product_df,on=['item_code'],how='left')
+            # Export data
+            log(f"THE RESULT DATA HAS {len(df)} ROWS")
+            log(f"Exporting {item} at {now()}...")
+            df.to_pickle(f"{export_path}{item}.pk")
+            log(f"exported to {export_path} at {now()}")
 
-        # log(f"Merging promotions data at {now()}...")
-        # res_df = get_prom(item=item, data=df, prom_info=prom_info, date_range=('2019-01-01', '2021-06-30'))
-
-        # Export data
-        log(f"THE RESULT DATA HAS {len(df)} ROWS")
-        log(f"Exporting {item} at {now()}...")
-        df.to_pickle(f"{export_path}{item}.pk")
-        log(f"exported to {export_path} at {now()}")
-
-    except Exception as error:
-        log(error, exc_info=True)
+        except:
+            traceback.print_exc()
 
 if __name__ == '__main__':
 
