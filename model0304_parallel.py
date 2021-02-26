@@ -11,19 +11,6 @@ import traceback
 import warnings
 warnings.simplefilter("ignore")
 
-def custom_logger(log_file):
-
-    logger = logging.getLogger(log_file)
-    logger.setLevel(logging.CRITICAL)
-    f = '%(message)s'
-    log_format = logging.Formatter(f)
-    
-    # ADD FILE HANDLER
-    file_handler = logging.FileHandler(log_file, mode='w')
-    file_handler.setFormatter(log_format)
-    logger.addHandler(file_handler)
-    return logger
-
 def now():
     return pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
 
