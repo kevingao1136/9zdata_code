@@ -33,3 +33,5 @@ kill -9 `ps -ef | grep train_model_parallel.py | grep -v grep | awk '{print $2}'
 
 # FIND PID BY FILE NAME
 ps aux | grep -i 'search-term'
+
+find output0304/ -name 100009992* -exec cp {} chosen_output0304/ \;
