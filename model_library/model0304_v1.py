@@ -1,7 +1,7 @@
 import os
 import pandas as pd
 import numpy as np
-from catboost import CatBoostRegressor
+from catboost import CatBoostRegressor, Pool
 from sklearn.preprocessing import LabelEncoder
 import matplotlib.pyplot as plt
 import traceback
@@ -155,7 +155,7 @@ def train_model(X_train, X_test, y_train, y_test):
 
     # CatBoost model
     model = CatBoostRegressor(
-                            iterations=1000,
+                            iterations=600,
                             learning_rate=0.1,
                             loss_function='RMSE',
                             one_hot_max_size=50,
@@ -168,10 +168,10 @@ def train_model(X_train, X_test, y_train, y_test):
         X=X_train,
         y=y_train,
         cat_features=cat_features,
-        sample_weight=np.linspace(0,1,len(X_train)) ** 2,
+        sample_weight=np.linspace(0,1,len(X_train)) ** 10,
         eval_set=(X_test, y_test),
         use_best_model=False,
-        early_stopping_rounds=100
+        early_stopping_rounds=200
     )
 
     return model
@@ -180,23 +180,24 @@ def retrain_model(X, y, trees, learning_rate):
 
     cat_features = ['year','month','store_type','activity_desc']
 
+    train_pool = Pool(data=X, 
+                    label=y,
+                    cat_features=cat_features, 
+                    weight=np.linspace(0,1,len(X)) ** 5
+                    )
+
     # CatBoost model
     #* PARAMETERS DEPEND ON PRIOR MODEL
     model = CatBoostRegressor(
                             iterations=trees,
                             learning_rate=learning_rate,
                             loss_function='RMSE',
-                            one_hot_max_size=50,
                             # loss_function='Tweedie:variance_power=1.5',
                             eval_metric='RMSE',
                             verbose=200
                             )
 
-    model.fit(X=X, 
-            y=y, 
-            cat_features=cat_features, 
-            sample_weight=np.linspace(0,1,len(X)) ** 2
-            )
+    model.fit(train_pool)
 
     return model
 
@@ -378,10 +379,10 @@ def main(item, threshold):
     raw_train_df, raw_test_df = load_data(f"{data_path}{item}.pk", 
         train_start=train_val_start, train_end=train_val_end, test_start=test_start, test_end=test_end)
     
-    # print(f"raw_train_df has features: {list(raw_train_df.columns)}")
-    if raw_train_df.day_dt.min() >= pd.to_datetime('2020-01-01'):
-        print(f"TRAINING DATA TOO SMALL, SKIP ITEM")
-        return None
+    # # print(f"raw_train_df has features: {list(raw_train_df.columns)}")
+    # if raw_train_df.day_dt.min() >= pd.to_datetime('2020-01-01'):
+    #     print(f"TRAINING DATA TOO SMALL, SKIP ITEM")
+    #     return None
 
     # PRINT TIME RANGE
     print(f"train_df: {raw_train_df.day_dt.min()} to {raw_train_df.day_dt.max()}")
@@ -409,8 +410,8 @@ def main(item, threshold):
     prom_schedule = get_prom_schedule(item=item, prom_info=prom_info) #* GET PROMOTION SCHEDULE FOR CURRENT ITEM
     train_df = train_df.merge(prom_schedule, how='left', on='day_dt')
     test_df = test_df.merge(prom_schedule, how='left', on='day_dt')
-    train_df.day_of_prom.fillna(-1,inplace=True)
-    test_df.day_of_prom.fillna(-1,inplace=True)
+    train_df.day_of_prom.fillna(0,inplace=True)
+    test_df.day_of_prom.fillna(0,inplace=True)
 
     # DEFINE FEATURES TO SELECT
     index_features = ['day_dt','store_id','item_code','loc_wh']
@@ -476,16 +477,14 @@ def main(item, threshold):
         test_df = test_df.drop_duplicates()
         
         # ADD VALIDATION DATASET INTO TRAINING
-        print(f"TRAINING NEW MODEL WITH ADDED VALIDATION DATA USING {model.best_iteration_+100} TREES AND {round(model.learning_rate_,4)} LEARNING RATE...")
-        retrained_model = retrain_model(X=X, y=y, trees=model.best_iteration_+100, learning_rate=model.learning_rate_)
+        print(f"TRAINING NEW MODEL WITH ADDED VALIDATION DATA...")
+        # retrained_model = retrain_model(X=X, y=y, trees=model.best_iteration_, learning_rate=model.learning_rate_)
 
         # PREDICT ON TEST DATASET
         print(f"PREDICTING ON TEST DATA...")
         test_X = test_df[X_features]
         test_X['year'] = test_X.year.apply(lambda x: 2020 if int(x) == 2021 else x)
-        test_df['y_pred'] = [round(x,4) for x in retrained_model.predict(test_X)]
-        print(test_df.sort_values('day_dt').query("day_dt < '2021-04-01'"))
-        print(test_X)
+        test_df['y_pred'] = [round(x,4) for x in model.predict(test_X)]
 
         print(f"PREDICTION RESULTS:")
         pred_results = test_df.groupby('day_dt').agg({'ttl_quantity':'sum', 'y_pred':'sum', 'unit_price':'mean'})
@@ -502,29 +501,26 @@ def main(item, threshold):
 
 #* DEFINE PATHS
 data_path = f"/app2/kevin_workspace/data0304/"
-img_path = f"/app/python-scripts/kevin_workspace/output0304_weight_retrain/train_img/"
-log_path = f"/app/python-scripts/kevin_workspace/output0304_weight_retrain/log/"
-result_data_path = f"/app/python-scripts/kevin_workspace/output0304_weight_retrain/result_data/"
-meta_path = f"/app/python-scripts/kevin_workspace/output0304_weight_retrain/meta_data/"
-# img_path = './test/'
-# result_data_path = './test/'
-# meta_path = './test/'
+img_path = f"/app/python-scripts/kevin_workspace/output0304_catfeatures_unitp_promschedule/train_img/"
+log_path = f"/app/python-scripts/kevin_workspace/output0304_catfeatures_unitp_promschedule/log/"
+result_data_path = f"/app/python-scripts/kevin_workspace/output0304_catfeatures_unitp_promschedule/result_data/"
+meta_path = f"/app/python-scripts/kevin_workspace/output0304_catfeatures_unitp_promschedule/meta_data/"
+img_path = './test/'
+result_data_path = './test/'
+meta_path = './test/'
 
 #* SET DATES
-train_val_start, train_val_end ='2019-01-01', '2021-01-27'
-test_start, test_end = '2021-03-18', '2021-06-30'
+train_val_start, train_val_end ='2019-01-01', '2021-03-18'
+test_start, test_end ='2021-03-18', '2021-06-30'
 v1_start, v1_end = '2020-12-16', '2021-01-07'
 v2_start, v2_end = '2021-01-08', '2021-01-27'
-
-# CHECK DATE ASSIGNMENTS
-assert train_val_end == v2_end, "train_val_end should = v2_end"
 
 if __name__ == '__main__':
 
     #* DEFINE ITEM LIST
-    item_list = [i[:-3] for i in os.listdir(data_path)]
-    item_list = item_list[2000:2500]
-    # item_list = ['100027487']
+    # item_list = [i[:-3] for i in os.listdir(data_path)]
+    # item_list = item_list[:500]
+    item_list = ['100037288']
     print(f"TRAIN MODEL FOR {len(item_list)} ITEMS, ITEM LIST: {item_list}")
 
     # Load needed data to add new features
@@ -535,11 +531,10 @@ if __name__ == '__main__':
     # Loop through each item
     for item in item_list:
         try:
-            main(item, threshold=0.75)
+            main(item, threshold=0)
 
         except:
             traceback.print_exc()
             continue
-
 
     print(f"TRAINING COMPLETED AT {now()}")

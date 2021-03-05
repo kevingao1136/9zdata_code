@@ -1,9 +1,11 @@
+import os
 import pandas as pd
 import numpy as np
 from impala.dbapi import connect
 from impala.util import as_pandas
 import contextlib
 from multiprocessing import Pool
+import traceback
 import warnings
 warnings.simplefilter("ignore")
 
@@ -110,7 +112,7 @@ def get_datefeature(path):
 
 def get_prominfo(path): 
     # Reduce prom_info
-    prom_info = pd.read_csv(path)
+    prom_info = pd.read_csv(path,compression='gzip')
 
     prom_info.rename({'label_001':'x件y折',
                     'label_002':'x元y件',
@@ -149,7 +151,7 @@ def gen_pog_and_date(item, date_feature, pog_path, test_path):
 
     ####################### TEST DATA #######################
     item_code_df = pd.DataFrame(data=[item], columns=['item_code'])
-    test_data = pd.read_csv(test_path) # TEST PERIOD AND ALL STORE ID
+    test_data = pd.read_csv(test_path, compression='gzip') # TEST PERIOD AND ALL STORE ID
     cross_join_prom = cartesian_product_basic(item_code_df, test_data)
     cross_join_prom['day_dt'] = pd.to_datetime(cross_join_prom['day_dt'])
     test_data = pd.merge(cross_join_prom, date_feature, on='day_dt', how='left')
@@ -299,18 +301,18 @@ def get_prom(item, data, prom_info, date_range):
 
 def main(item):
 
-    with open(f"{log_path}{item}.log", "w") as train_log, contextlib.redirect_stdout(train_log), contextlib.redirect_stderr(train_log):
+    with open(f"{log_path}{item}.log", "w") as etl_log, contextlib.redirect_stdout(etl_log), contextlib.redirect_stderr(etl_log):
         try:
             # Load data
             print(f"IMPORTING ITEM {item} AT {now()}")
             print(f"Loading POG data...")
             pog_df = gen_pog_and_date(item=item,
                                     date_feature=date_feature,
-                                    pog_path='scai.0318_0414_pog',
-                                    test_path='assist_data/test_sample.csv')
+                                    pog_path='scai.0415_0512_pog',
+                                    test_path='/app/python-scripts/kevin_workspace/assist_data/test_sample0405.csv.gz')
 
             print(f"Loading sales data...")
-            sales_df = getsaletable(item=item, path='scai.0318_0414_item_sales')
+            sales_df = getsaletable(item=item, path='scai.0415_0512_item_sales')
 
             print(f"Merging POG, store, product, and sales data...")
             df = pog_df.merge(store_df,on='store_id',how='inner')
@@ -318,12 +320,12 @@ def main(item):
             df = df.merge(product_df,on=['item_code'],how='left')
 
             print(f"Merging promotions data...")
-            res_df = get_prom(item=item, data=df, prom_info=prom_info, date_range=('2019-01-01', '2021-06-30'))
+            res_df = get_prom(item=item, data=df, prom_info=prom_info, date_range=('2019-01-01', '2021-07-28'))
 
             # Export data
             print(f"THE RESULT DATA HAS {len(res_df)} ROWS")
             print(f"Exporting {item} at {now()}...")
-            res_df.to_pickle(f"{export_path}{item}.pk")
+            res_df.to_pickle(f"{export_path}{item}.pk.gz",compression='gzip')
             print(f"exported to {export_path} at {now()}")
 
         except:
@@ -332,23 +334,22 @@ def main(item):
 if __name__ == '__main__':
 
     #* GET ITEM LIST
-    data = impala_query(f"select distinct item_code from scai.0318_0414_item_sales")
-    item_list = list(data.item_code)[:5]
-    # exported = [i[:-3] for i in os.listdir('/app2/kevin_workspace/data0304')]
+    data = impala_query(f"select distinct item_code from scai.0415_0512_item_sales")
+    item_list = list(data.item_code)
+    # exported = [i[:i.index('.pk.gz')] for i in os.listdir('/app2/kevin_workspace/data0405')]
     # item_list = [i for i in item_list if i not in exported]
+    # print(item_list)
 
     #* DEFINE EXPORT PATH
-    # export_path = '/app/python-scripts/kevin_workspace/'
-    export_path = './test/'
-    log_path = './test/'
+    export_path = '/app2/kevin_workspace/data0405/'
+    log_path = '/app/python-scripts/kevin_workspace/ETL_library/log0405/'
+    # export_path = log_path = '/app/python-scripts/kevin_workspace/test/'
 
     # LOAD FIXED DATA
     print(f"Loading date_feature, prom_info, store_df, product_df at {now()}")
-    date_feature, prom_info = get_datefeature(path='/app/python-scripts/data/date_feature.csv'), get_prominfo(path='/app/python-scripts/kevin_workspace/assist_data/prom_info.csv')
+    date_feature, prom_info = get_datefeature(path='/app/python-scripts/data/date_feature.csv'), get_prominfo(path='/app/python-scripts/kevin_workspace/assist_data/prom_info.csv.gz')
     store_df = get_store_info(path='ods_sc.dim_organization')
     product_df = get_product_info(path='ods_sc.dim_product')
-
-    # log(f"COMMON ITEMS: {list(set(item_list) & set(prom_info.item.unique()))}")
 
     # MAKE IT A LIST OF STRINGS
     item_list = [str(item) for item in item_list]

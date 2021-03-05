@@ -1,24 +1,15 @@
 import os
+import functools
+import contextlib
 import pandas as pd
 import numpy as np
+from multiprocessing import Pool as multi_pool
 from catboost import CatBoostRegressor, Pool
 from sklearn.preprocessing import LabelEncoder
+import matplotlib.pyplot as plt
+import traceback
 import warnings
 warnings.simplefilter("ignore")
-import matplotlib.pyplot as plt
-
-#* DEFINE PATHS
-data_path = f"/app2/kevin_workspace/data0304/"
-img_path = f"/app/python-scripts/kevin_workspace/output0304_unitprice/train_img/"
-log_path = f"/app/python-scripts/kevin_workspace/output0304_unitprice/log/"
-result_data_path = f"/app/python-scripts/kevin_workspace/output0304_unitprice/result_data/"
-meta_path = f"/app/python-scripts/kevin_workspace/output0304_unitprice/meta_data/"
-
-#* SET DATES
-train_val_start, train_val_end ='2019-01-01', '2021-03-18'
-test_start, test_end ='2021-03-18', '2021-06-30'
-v1_start, v1_end = '2020-12-16', '2021-01-07'
-v2_start, v2_end = '2021-01-08', '2021-01-27'
 
 def now():
     return pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -89,7 +80,7 @@ def impute_data(df):
     df['ttl_quantity'].fillna(0,inplace=True)
     df['pds_mtg_type'].fillna('Others(其它',inplace=True)
     df['loc_selling_area'] = df.groupby(['store_type'])['loc_selling_area'].transform(lambda x: x.fillna(x.median()))
-    df['p_rate'] = df.unit_price / df.retail_price # CORRECT P_RATE
+    df['p_rate'] = df.unit_price / df.retail_price #* CORRECT P_RATE AFTER UNIT PRICE UPDATE
     df['isweekend'] = df.weekday.apply(lambda x: 1 if x in (5,6) else 0)
 
     return df
@@ -114,6 +105,16 @@ def label_encoder(df, X_features):
 
     return df
 
+def get_prom_schedule(item, prom_info):
+
+    offer_schedule = pd.DataFrame()
+
+    for start_date, end_date in zip(pd.to_datetime(prom_info[prom_info.item == int(item)].offer_start_date), pd.to_datetime(prom_info[prom_info.item == int(item)].offer_end_date)):
+        date_range = pd.date_range(start_date, end_date)
+        offer_schedule = pd.concat([offer_schedule, pd.DataFrame({'day_dt':date_range, 'day_of_prom':range(len(date_range))})])
+
+    return offer_schedule
+
 def agg_results(val_start, val_end, df):
 
     df = df[df.day_dt.between(val_start, val_end)]
@@ -136,11 +137,12 @@ def load_data(item_path, train_start, train_end, test_start, test_end):
         train_df: training data including validation data
         test_df: test data
     """
-    df = pd.read_pickle(item_path)
+    df = pd.read_csv(item_path, parse_dates=['day_dt'], compression='gzip')
 
     # GET TRAIN DATA AND IMPUTE UNIT PRICE
     train_df = df[df.day_dt.between(train_start, train_end)]
     train_df.area_idnt = train_df.area_idnt.astype(int)
+    unit_price.area_idnt = unit_price.area_idnt.astype(int)
     train_df = train_df.merge(unit_price, on=['item_code','area_idnt','day_dt'], how='left')
     train_df['unit_price2'].fillna(train_df['unit_price'],inplace=True)
     train_df.drop('unit_price',axis=1,inplace=True)
@@ -153,34 +155,28 @@ def load_data(item_path, train_start, train_end, test_start, test_end):
 
 def train_model(X_train, X_test, y_train, y_test):
 
-    # cat_features = ['month','store_type','activity_desc']
-
-    train_pool = Pool(data=X_train, 
-                    label=y_train, 
-                    # cat_features=cat_features, 
-                    # weight=np.exp(np.linspace(0,10,len(X_train)))
-                    )
-
-    val_pool = Pool(data=X_test, 
-                    label=y_test, 
-                    # cat_features=cat_features
-                    )
+    cat_features = ['year','month','store_type','activity_desc']
 
     # CatBoost model
     model = CatBoostRegressor(
-                            iterations=1000,
-                            # learning_rate=0.1,
-                            loss_function='RMSE',
-                            # loss_function='Tweedie:variance_power=1.5',
-                            eval_metric='RMSE',
-                            verbose=200
-                            )
+                iterations=1000,
+                learning_rate=0.1,
+                loss_function='RMSE',
+                one_hot_max_size=50,
+                # loss_function='Tweedie:variance_power=1.9',
+                eval_metric='RMSE',
+                verbose=200
+                )
 
-    model.fit(train_pool,
-            eval_set=val_pool,
-            early_stopping_rounds=300,
-            # use_best_model=False
-            )
+    model.fit(
+        X=X_train,
+        y=y_train,
+        cat_features=cat_features,
+        # sample_weight=np.linspace(0,1,len(X_train)) ** 4,
+        eval_set=(X_test, y_test),
+        # use_best_model=False,
+        early_stopping_rounds=50
+    )
 
     return model
 
@@ -210,6 +206,7 @@ def retrain_model(X, y, trees, learning_rate):
     return model
 
 def show_results(df):
+
     print(f"0-50%: {np.mean([1 if r<=0.5 else 0 for r in df.ratio])}")
     print(f"50-80%: {np.mean([1 if r>=0.5 and r<=0.8 else 0 for r in df.ratio])}")
     print(f"80-100%: {np.mean([1 if r>=0.8 and r<=1 else 0 for r in df.ratio])}")
@@ -257,6 +254,9 @@ def plot_pred_results(item_code, train, val, test, img_path):
     val_store_cnt, = par2.plot(val.groupby(['day_dt']).store_id.nunique(),'--',color='m')
     test_store_cnt, = par2.plot(test.groupby(['day_dt']).store_id.nunique(),'--',color='m')
     host.axvline(x=val.day_dt.min(),color='k',ls='--',linewidth=3)
+    x_ticks = pd.to_datetime(pd.date_range(train.day_dt.min(), test.day_dt.max()).map(lambda x: x.strftime('%Y-%m')).unique())
+    host.tick_params(axis='x', rotation=45)
+    host.set_xticks(x_ticks)
     host.grid()
 
     # SET Y LIMITS
@@ -377,157 +377,190 @@ def export_results(item_code, train, val1, val2, test):
 
 def main(item, threshold):
 
-    print(f"______________________________________________________________________________________________________________")
-    print(f"ITEM {item} STARTING AT {now()}, PROCESS: {item_list.index(item)+1} OUT OF {len(item_list)}")
-    print(f"Loading data from {data_path}")
-    raw_train_df, raw_test_df = load_data(f"{data_path}{item}.pk", 
-        train_start=train_val_start, train_end=train_val_end, test_start=test_start, test_end=test_end)
-    
-    # print(f"raw_train_df has features: {list(raw_train_df.columns)}")
-    if raw_train_df.day_dt.min() >= pd.to_datetime('2020-01-01'):
-        print(f"TRAINING DATA TOO SMALL, SKIP ITEM")
-        return None
+    with open(f"{log_path}{item}.log", "w") as train_log, contextlib.redirect_stdout(train_log), contextlib.redirect_stderr(train_log):
+        try:
+            print(f"______________________________________________________________________________________________________________")
+            print(f"ITEM {item} STARTING AT {now()}, PROCESS: {item_list.index(item)+1} OUT OF {len(item_list)}")
+            print(f"Loading data from {data_path}")
+            raw_train_df, raw_test_df = load_data(f"{data_path}{item}.csv.gz", 
+                train_start=train_val_start, train_end=train_val_end, test_start=test_start, test_end=test_end)
 
-    # PRINT TIME RANGE
-    print(f"train_df: {raw_train_df.day_dt.min()} to {raw_train_df.day_dt.max()}")
-    print(f"test_df: {raw_test_df.day_dt.min()} to {raw_test_df.day_dt.max()}")
-    print(f"UNIQUE OFFERS IN TRAIN AND VAL: {raw_train_df.offer_code.unique()}")
-    print(f"UNIQUE OFFERS IN TEST {raw_test_df.offer_code.unique()}")
+            # # print(f"raw_train_df has features: {list(raw_train_df.columns)}")
+            # if raw_train_df.day_dt.min() >= pd.to_datetime('2020-01-01'):
+            #     print(f"TRAINING DATA TOO SMALL, SKIP ITEM")
+            #     return None
 
-    # IF EMPTY, CONTINUE WITH NEXT ITEM
-    try:
-        assert len(raw_train_df[raw_train_df.day_dt < v1_start]) > 0, "EMPTY TRAIN DATA" # IF TRAIN DATASET BEFORE V1 IS EMPTY
-        assert len(raw_test_df) > 0, "EMPTY TEST DATA"
-    except AssertionError as error:
-        print(f"item {item} has error: {error}") 
-        return None
-    
-    # MAKE NEW COPIES OF DATAFRAMES
-    train_df, test_df = raw_train_df.copy(), raw_test_df.copy()
+            # PRINT TIME RANGE
+            print(f"train_df: {raw_train_df.day_dt.min()} to {raw_train_df.day_dt.max()}")
+            print(f"test_df: {raw_test_df.day_dt.min()} to {raw_test_df.day_dt.max()}")
+            
+            # IF EMPTY, CONTINUE WITH NEXT ITEM
+            if len(raw_train_df[raw_train_df.day_dt < v1_start]) == 0 or len(raw_test_df) == 0:
+                print(f"EMTPY TRAIN, VAL OR TEST DATA >>>")
+                return None
+            
+            # PRINT OFFER DESC FROM TRAIN, VAL AND TEST
+            try:
+                print("OFFERS IN TRAIN AND VAL DATA:")
+                for offer in raw_train_df.offer_code.dropna().unique():
+                    print(prom_info[(prom_info.offer_code == int(offer)) & (prom_info.item == int(item))][['offer_start_date','offer_end_date','promotion_merch','buyer_note','retail_price', 'prom_price','unit_price']].to_markdown(showindex=False))
+                    print(prom_info[prom_info.offer_code == int(offer)].item_desc)
+                print("OFFERS IN TEST DATA:")
+                for offer in raw_test_df.offer_code.dropna().unique():
+                    print(prom_info[(prom_info.offer_code == int(offer)) & (prom_info.item == int(item))][['offer_start_date','offer_end_date','promotion_merch','buyer_note','retail_price', 'prom_price','unit_price']].to_markdown(showindex=False))
+                    print(prom_info[prom_info.offer_code == int(offer)].item_desc)
+            except Exception as e:
+                print(f"Error when printing offer desc: {e}")
+            
+            # MAKE NEW COPIES OF DATAFRAMES
+            train_df, test_df = raw_train_df.copy(), raw_test_df.copy()
+            del raw_train_df, raw_test_df
 
-    # ADD LUNAR NEW YEAR FEATURE
-    train_df = train_df.merge(lunar, how='left', on='day_dt')
-    test_df = test_df.merge(lunar, how='left', on='day_dt')
+            # ADD NUM ITEMS TO TRAIN AND TEST
+            num_items_dict = prom_info.groupby(['offer_code']).item.count().to_frame().reset_index().rename({'item':'num_items_in_offer'},axis=1)
+            train_df = train_df.merge(num_items_dict, how='left', on='offer_code')
+            train_df.num_items_in_offer.fillna(100,inplace=True)
+            test_df = test_df.merge(num_items_dict, how='left', on='offer_code')
+            test_df.num_items_in_offer.fillna(100,inplace=True)
 
-    # ADD PROMOTION SCHEDULE FEATURE
-    train_df = train_df.merge(prom_schedule, how='left', on='day_dt')
-    test_df = test_df.merge(prom_schedule, how='left', on='day_dt')
+            # ADD LUNAR NEW YEAR FEATURE
+            train_df = train_df.merge(lunar, how='left', on='day_dt')
+            test_df = test_df.merge(lunar, how='left', on='day_dt')
 
-    # DEFINE FEATURES TO SELECT
-    index_features = ['day_dt','store_id','item_code','loc_wh']
-    
-    # X_features = [
-    #             'activity_desc', 
-    #             'day_type', 'last_day_type','month', 'mday', 'weekday', 'is_5th', 'dis_spring', 'schedule_ix',
-    #             'distt_idnt', 'regn_idnt', 'area_idnt', 'mkt_idnt', 'store_type', 'loc_selling_area', 
-    #             'pds_location_type_en','pds_mtg_type', 'pds_store_segmentation', 'pds_grace', 
-    #             'pds_floor_type', 'city_tier', 'is_intracity_dlvr_store', 'is_central_store',
-    #             'p_rate', 'unit_price', 'osd_type'
-    #             ]
+            # ADD PROMOTION SCHEDULE FEATURE
+            prom_schedule = get_prom_schedule(item=item, prom_info=prom_info) #* GET PROMOTION SCHEDULE FOR CURRENT ITEM
+            train_df = train_df.merge(prom_schedule, how='left', on='day_dt')
+            test_df = test_df.merge(prom_schedule, how='left', on='day_dt')
+            train_df.day_of_prom.fillna(-1,inplace=True)
+            test_df.day_of_prom.fillna(-1,inplace=True)
+            
+            # DEFINE FEATURES TO SELECT
+            index_features = ['day_dt','store_id','item_code','loc_wh']
+            
+            X_features = ['day_type', 'month', 'weekday', 'isweekend', 'store_type', 
+            'activity_desc', 'year', 'is_5th', 'prom0', 'prom1', 'prom2', 'prom3', 
+            'prom4', 'prom5', 'prom6', 'prom7', 'is_vip', 'free_gift', 'required_num', 
+            'unit_price', 'p_rate', 'dis_spring','day_of_prom','num_items_in_offer']
 
-    X_features = ['day_type','month','weekday','store_type','activity_desc','year','is_5th',
-                'prom0','prom1','prom2','prom3','prom4','prom5','prom6','prom7', 
-                'is_vip','free_gift',
-                'required_num','unit_price','p_rate',
-                'schedule_ix','dis_spring'
-                ]
+            y_feature = ['ttl_quantity']
 
-    y_feature = ['ttl_quantity']
+            print(f"SELECTED FEATURES: {X_features}")
 
-    print(f"SELECTED FEATURES: {X_features}")
+            print(f"Cleaning train data...")
+            train_df = clean_data(train_df)
+            train_df = impute_data(train_df)
+            train_df = select_features(index_features+X_features+y_feature, train_df)
+            train_df = label_encoder(train_df,X_features)
 
-    print(f"Cleaning train data...")
-    train_df = clean_data(train_df)
-    train_df = impute_data(train_df)
-    train_df = select_features(index_features+X_features+y_feature, train_df)
-    train_df = label_encoder(train_df,X_features)
+            print(f"Cleaning test data...")
+            test_df = clean_data(test_df)
+            test_df = impute_data(test_df)
+            test_df = select_features(index_features+X_features+y_feature, test_df)
+            test_df = label_encoder(test_df,X_features)
 
-    print(f"Cleaning test data...")
-    test_df = clean_data(test_df)
-    test_df = impute_data(test_df)
-    test_df = select_features(index_features+X_features+y_feature, test_df)
-    test_df = label_encoder(test_df,X_features)
+            train_df = train_df.sort_values('day_dt')
 
-    # SPLIT TRAIN DATA INTO TRAIN AND VALIDATION
-    train_start, train_end, val_start, val_end = train_val_start, v1_start, v1_start, v2_end
-    train_index = train_df[train_df.day_dt.between(train_start, train_end)].index
-    val_index = train_df[train_df.day_dt.between(val_start, val_end)].index
+            # SPLIT TRAIN DATA INTO TRAIN AND VALIDATION
+            train_start, train_end, val_start, val_end = train_val_start, v1_start, v1_start, v2_end
+            train_index = train_df[train_df.day_dt.between(train_start, train_end)].index
+            val_index = train_df[train_df.day_dt.between(val_start, val_end)].index
 
-    # Define X and y
-    X = train_df[X_features]
-    X['year'] = X['year'].apply(lambda x: 2020 if int(x) == 2021 else x)
-    y = train_df[y_feature[0]]
-    X_train, X_test, y_train, y_test = X.loc[train_index], X.loc[val_index], y.loc[train_index], y.loc[val_index]
+            # Define X and y
+            X = train_df[X_features]
+            X['year'] = X['year'].apply(lambda x: 2020 if int(x) == 2021 else x)
+            y = train_df[y_feature[0]]
+            X_train, X_test, y_train, y_test = X.loc[train_index], X.loc[val_index], y.loc[train_index], y.loc[val_index]
 
-    print(f"Training model...")
-    model = train_model(X_train, X_test, y_train, y_test)
+            print(f"Training model...")
+            model = train_model(X_train, X_test, y_train, y_test)
 
-    print(f"Evaluating model...")
-    y_pred_val = model.predict(X_test)
-    y_pred_train = model.predict(X_train)
+            print(f"Evaluating model...")
+            y_pred_val = model.predict(X_test)
+            y_pred_train = model.predict(X_train)
 
-    # GET EVALUATE RESULTS
-    train_evaluate, val_evaluate = train_df.loc[train_index], train_df.loc[val_index]
-    train_evaluate['y_pred'], val_evaluate['y_pred']  = y_pred_train, y_pred_val
-    train_evaluate['residual'], val_evaluate['residual'] = train_evaluate.ttl_quantity - train_evaluate.y_pred, val_evaluate.ttl_quantity - val_evaluate.y_pred
-    
-    # VALIDATION RESULTS
-    item_wh = agg_results(val_start=val_start, val_end=val_end, df=val_evaluate)
-    val_passed = np.mean([1 if r>=0.65 and r<=1.2 else 0 for r in item_wh.ratio])
-    print(f"ALL VALIDATION {val_start, val_end} RESULTS________________________________________________________________________")
-    show_results(item_wh)
-    print(item_wh)
+            # GET EVALUATE RESULTS
+            train_evaluate, val_evaluate = train_df.loc[train_index], train_df.loc[val_index]
+            train_evaluate['y_pred'], val_evaluate['y_pred']  = y_pred_train, y_pred_val
+            # train_evaluate['residual'], val_evaluate['residual'] = train_evaluate.ttl_quantity - train_evaluate.y_pred, val_evaluate.ttl_quantity - val_evaluate.y_pred
 
-    if val_passed >= threshold: #* IF 75% SELL THRU BETWEEN 65% AND 120%
+            # VALIDATION RESULTS
+            item_wh = agg_results(val_start=val_start, val_end=val_end, df=val_evaluate)
+            val_passed = np.mean([1 if r>=0.65 and r<=1.2 else 0 for r in item_wh.ratio])
+            print(f"ALL VALIDATION {val_start, val_end} RESULTS________________________________________________________________________")
+            show_results(item_wh)
+            print(item_wh)
 
-        print(f"ITEM PASSED!!!")
-        if test_df.duplicated().any() == True: # CHECK DUPLICATES IN TEST DATA
-            print("DUPLICATED DATA IN TEST DATA...REMOVED")
-        test_df = test_df.drop_duplicates()
-        
-        # ADD VALIDATION DATASET INTO TRAINING
-        print(f"TRAINING NEW MODEL WITH ADDED VALIDATION DATA...")
-        # retrained_model = retrain_model(X=X, y=y, trees=model.best_iteration_, learning_rate=model.learning_rate_)
+            if val_passed >= threshold: #* IF 75% SELL THRU BETWEEN 65% AND 120%
 
-        # PREDICT ON TEST DATASET
-        print(f"PREDICTING ON TEST DATA...")
-        test_X = test_df[X_features]
-        test_X['year'] = test_X.year.apply(lambda x: 2020 if int(x) == 2021 else x)
-        test_df['y_pred'] = [round(x,4) for x in model.predict(test_X)]
+                print(f"ITEM PASSED!!!")
+                if test_df.duplicated().any() == True: # CHECK DUPLICATES IN TEST DATA
+                    print("DUPLICATED DATA IN TEST DATA...REMOVED")
+                test_df = test_df.drop_duplicates()
 
-        print(f"PREDICTION RESULTS:")
-        pred_results = test_df.groupby('day_dt').agg({'ttl_quantity':'sum', 'y_pred':'sum', 'unit_price':'mean'})
-        pred_results['ratio'] = pred_results.ttl_quantity / pred_results.y_pred
-        print(pred_results)
+                # ADD VALIDATION DATASET INTO TRAINING
+                print(f"TRAINING NEW MODEL WITH ADDED VALIDATION DATA...")
+                # retrained_model = retrain_model(X=X, y=y, trees=model.best_iteration_, learning_rate=model.learning_rate_)
 
-        print(f"EXPORTING RESULT DATA, META DATA, IMG, LOG...")
-        export_results(item_code=item,
-                    train=train_evaluate,
-                    val1=val_evaluate[val_evaluate.day_dt.between(v1_start, v1_end)],
-                    val2=val_evaluate[val_evaluate.day_dt.between(v2_start, v2_end)],
-                    test=test_df)
-        print(f"EXPORTED RESULTS TO {img_path} AT {now()}")
+                # PREDICT ON TEST DATASET
+                print(f"PREDICTING ON TEST DATA...")
+                test_X = test_df[X_features]
+                test_X['year'] = test_X.year.apply(lambda x: 2020 if int(x) == 2021 else x)
+                test_df['y_pred'] = [round(x,4) for x in model.predict(test_X)]
+
+                print(f"PREDICTION RESULTS:")
+                pred_results = test_df.groupby('day_dt').agg({'ttl_quantity':'sum', 'y_pred':'sum', 'unit_price':'mean'})
+                pred_results['ratio'] = pred_results.ttl_quantity / pred_results.y_pred
+                print(pred_results)
+
+                print(f"EXPORTING RESULT DATA, META DATA, IMG, LOG...")
+                export_results(item_code=item,
+                            train=train_evaluate,
+                            val1=val_evaluate[val_evaluate.day_dt.between(v1_start, v1_end)],
+                            val2=val_evaluate[val_evaluate.day_dt.between(v2_start, v2_end)],
+                            test=test_df)
+                print(f"EXPORTED RESULTS TO {img_path} AT {now()}")
+            print(f"ITEM TRAINING FINISHED AT {now()}")
+            
+        except:
+            traceback.print_exc()
+
+#* DEFINE PATHS
+data_path = f"/app2/kevin_workspace/data0103/"
+# img_path = f"/app/python-scripts/kevin_workspace/0102retrain/"
+# log_path = f"/app/python-scripts/kevin_workspace/0102retrain/"
+# result_data_path = f"/app/python-scripts/kevin_workspace/0102retrain/"
+# meta_path = f"/app/python-scripts/kevin_workspace/0102retrain/"
+img_path = './test/'
+log_path = './test/'
+result_data_path = './test/'
+meta_path = './test/'
+
+#* SET DATES
+train_val_start, train_val_end ='2019-01-01', '2021-01-06'
+test_start, test_end ='2021-01-28', '2021-03-17'
+v1_start, v1_end = '2020-11-19', '2020-12-16'
+v2_start, v2_end = '2020-12-17', '2021-01-06'
 
 if __name__ == '__main__':
 
     #* DEFINE ITEM LIST
-    item_list = [i[:-3] for i in os.listdir(data_path)]
-    item_list = item_list[2000:2500]
-    print(f"TRAIN MODEL FOR {len(item_list)} ITEMS, ITEM LIST: {item_list}")
+#     file_list = os.listdir("/app/python-scripts/kevin_workspace/old_code/output_cat_0103_wo_val/meta_data/")
+#     item_list = [f[:f.index('_')] for f in file_list]
+    item_list = ['100659714']
+    
+#     item_list = [i[:-4] for i in os.listdir(data_path)]
+    print(f"TRAINING MODEL FOR {len(item_list)} ITEMS AT {now()}, ITEM LIST: {item_list}")
 
     # Load needed data to add new features
-    unit_price = pd.read_csv('assist_data/unit_price_from_sales_0318_0414.csv',parse_dates=['day_dt'])
-    lunar = pd.read_csv('assist_data/lunar_days.csv', parse_dates=['day_dt'], usecols=['day_dt','dis_spring'])
-    prom_schedule = pd.read_csv('assist_data/schedule.csv',parse_dates=['day_dt'])
-    prom_schedule.fillna(0, inplace=True)
+    unit_price = pd.read_csv('/app/python-scripts/kevin_workspace/assist_data/unit_price0304.csv.gz',parse_dates=['day_dt'], compression='gzip')
+    lunar = pd.read_csv('/app/python-scripts/kevin_workspace/assist_data/lunar_days.csv.gz', parse_dates=['day_dt'], usecols=['day_dt','dis_spring'], compression='gzip')
+    prom_info = pd.read_csv('/app/python-scripts/kevin_workspace/assist_data/prom_info.csv.gz',compression='gzip')
+    
+    main(item_list[0], 0)
+    # # RUN MULTIPROCESSING
+    # pool = multi_pool(8)
+    # pool.map(functools.partial(main, threshold=0), item_list)
+    # pool.close()
+    # pool.join()
 
-    # Loop through each item
-    for item in item_list:
-        try:
-            main(item, threshold=0.75)
-
-        except Exception as error:
-            print(f"ERROR IN MAJOR LOOP: {error}")
-            continue
-
-    print(f"TRAINING COMPLETED AT {now()}")
+    # print(f"TRAINING COMPLETED AT {now()}")
