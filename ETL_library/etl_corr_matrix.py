@@ -1,0 +1,435 @@
+import os
+import time
+import pandas as pd
+import numpy as np
+from impala.dbapi import connect
+from impala.util import as_pandas
+import traceback
+import warnings
+warnings.simplefilter("ignore")
+
+def now(): 
+    return pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
+
+def reduce_mem_usage(props):
+    start_mem_usg = props.memory_usage().sum() / 1024**2 
+    # print("Memory usage of properties dataframe is :",start_mem_usg," MB")
+    NAlist = [] # Keeps track of columns that have missing values filled in. 
+    for col in props.columns:
+        if props[col].dtype != object and props[col].dtype != 'datetime64[ns]':  # Exclude strings
+            
+            # Print current column type
+            # print("******************************")
+            # print("Column: ",col)
+            # print("dtype before: ",props[col].dtype)
+            
+            # make variables for Int, max and min
+            IsInt = False
+            mx = props[col].max()
+            mn = props[col].min()
+            
+            # Integer does not support NA, therefore, NA needs to be filled
+            if not np.isfinite(props[col]).all():
+                NAlist.append(col)
+                props[col].fillna(mn-1,inplace=True)  
+                   
+            # test if column can be converted to an integer
+            asint = props[col].fillna(0).astype(np.int64)
+            result = (props[col] - asint)
+            result = result.sum()
+            if result > -0.01 and result < 0.01:
+                IsInt = True
+
+            
+            # Make Integer/unsigned Integer datatypes
+            if IsInt:
+                if mn >= 0:
+                    if mx < 255:
+                        props[col] = props[col].astype(np.uint8)
+                    elif mx < 65535:
+                        props[col] = props[col].astype(np.uint16)
+                    elif mx < 4294967295:
+                        props[col] = props[col].astype(np.uint32)
+                    else:
+                        props[col] = props[col].astype(np.uint64)
+                else:
+                    if mn > np.iinfo(np.int8).min and mx < np.iinfo(np.int8).max:
+                        props[col] = props[col].astype(np.int8)
+                    elif mn > np.iinfo(np.int16).min and mx < np.iinfo(np.int16).max:
+                        props[col] = props[col].astype(np.int16)
+                    elif mn > np.iinfo(np.int32).min and mx < np.iinfo(np.int32).max:
+                        props[col] = props[col].astype(np.int32)
+                    elif mn > np.iinfo(np.int64).min and mx < np.iinfo(np.int64).max:
+                        props[col] = props[col].astype(np.int64)    
+            
+            # Make float datatypes 32 bit
+            else:
+                props[col] = props[col].astype(np.float32)
+            
+            # Print new column type
+            # print("dtype after: ",props[col].dtype)
+            # print("******************************")
+    
+    # Print final result
+    # print("___MEMORY USAGE AFTER COMPLETION:___")
+    mem_usg = props.memory_usage().sum() / 1024**2 
+    # print("Memory usage is: ",mem_usg," MB")
+    # print("This is ",100*mem_usg/start_mem_usg,"% of the initial size")
+    return props, NAlist
+
+def impala_query(sql):
+    '''
+    Parameters:
+        sql - sql query
+    Returns:
+        data - dataframe from sql query
+    '''
+    config = {'host': '10.82.28.136', 'port': 21051, 'database': 'default', 'use_ssl': False}
+    impala_conn = connect(**config)
+    impala_cursor = impala_conn.cursor()
+    impala_cursor.execute(sql)
+    data = as_pandas(impala_cursor)
+    impala_conn.close()
+
+    return data
+
+def cartesian_product_basic(left, right):
+    return (left.assign(key=1).merge(right.assign(key=1), on='key').drop('key', 1))
+
+def get_datefeature(path):
+    """
+    Returns:
+        date_feature:   day features - mday, yday, holidays
+        prom_info:      promotion features data
+    """
+    # Reduce date_feature
+    date_feature = pd.read_csv(path, parse_dates=['day_dt'])
+    date_feature.drop(['day_of_mth','day_of_qtr','day_of_yr','wk_of_mth','wk_of_qtr','wk_of_yr'],axis=1,inplace=True)
+    date_feature, _ = reduce_mem_usage(date_feature)
+
+    return date_feature
+
+def get_prominfo(): 
+    # Reduce prom_info
+    prom_info = pd.read_csv('./assist_data/prom_info.csv.gz',compression='gzip')
+
+    prom_info.rename({'label_001':'x件y折',
+                    'label_002':'x元y件',
+                    'label_003':'加x元多y件',
+                    'label_004':'买x送y',
+                    'label_005':'满x减y',
+                    'label_006':'x件减y',
+                    'label_007':'第x件y折',
+                    'label_008':'换购'
+                    },axis=1,inplace=True)
+
+    prom_info = prom_info[['item', 'offer_code', 'offer_start_date', 'offer_end_date',
+                        'osd_type', 'outputs', 'x件y折', 'x元y件', '加x元多y件', '买x送y', '满x减y',
+                        'x件减y', '第x件y折', '换购', 'is_vip', 'free_gift', 'unit_price',
+                        'required_num', 'amount', 'prom_price', 'retail_price','flag']]
+    prom_info['offer_start_date'] = pd.to_datetime(prom_info['offer_start_date'], errors='coerce')
+    prom_info['offer_end_date'] = pd.to_datetime(prom_info['offer_end_date'], errors='coerce')
+    prom_info = prom_info.dropna(subset=['item', 'offer_end_date', 'offer_start_date'])
+    prom_info['offer_code'] = prom_info['offer_code'].astype(int).astype(str)
+    prom_info['item'] = prom_info['item'].astype(int).astype(str)
+    
+
+    return prom_info
+
+def gen_pog_and_date(item, date_feature, pog_path):
+    """
+    Parameters:
+        item: item code (string)
+        date_feature: feature of calendar data
+    Returns:
+        data: POG data
+    """
+    pog_data = impala_query(f"select ITEM_IDNT, WK_IDNT, LOC_IDNT from {pog_path} where ITEM_IDNT = '{item}'")
+    data = pog_data.merge(date_feature, on='wk_idnt', how='left')
+    data.rename(columns={'item_idnt': 'item_code', 'loc_idnt': 'store_id'}, inplace=True)
+
+    # ####################### TEST DATA #######################
+    # item_code_df = pd.DataFrame(data=[item], columns=['item_code'])
+    # test_data = pd.read_csv(test_path, compression='gzip') # TEST PERIOD AND ALL STORE ID
+    # cross_join_prom = cartesian_product_basic(item_code_df, test_data)
+    # cross_join_prom['day_dt'] = pd.to_datetime(cross_join_prom['day_dt'])
+    # test_data = pd.merge(cross_join_prom, date_feature, on='day_dt', how='left')
+    # data = pd.concat([data, test_data])
+    # data.drop(columns=['wk_idnt'], inplace=True)
+    # data['item_code'] = data['item_code'].apply(pd.to_numeric)
+    # data['day_dt'] = pd.to_datetime(data['day_dt'])
+    # data.drop_duplicates(inplace=True)
+
+    return data
+
+def get_store_info(path):
+    '''
+    Returns:
+        store_info - store data
+    '''
+    #store info
+    store_info = impala_query(f"""
+    select loc_idnt as store_id,
+                    distt_idnt,
+                    regn_idnt,
+                    area_idnt,
+                    mkt_idnt,
+                    store_type,
+                    loc_fmt_cde,
+                    loc_selling_area,
+                    loc_tot_area,
+                    pds_location_type_en,
+                    pds_mtg_type,
+                    pds_store_segmentation,
+                    pds_grace,
+                    pds_floor_type,
+                    city_tier,
+                    zone_id,
+                    is_intracity_dlvr_store,
+                    loc_wh,
+                    is_central_store
+    from {path}
+    where is_e_store='N' and loc_type_cde='S' and loc_end_dt is null and area_idnt in ('1','2','3','4')
+    """)
+
+    store_info['store_id'] = store_info['store_id'].apply(pd.to_numeric)
+    if store_info['store_id'].duplicated().any() == True:
+        print(f"ALERT>>>>>>>>>>>>>>DUPLICATED STORE_ID")
+
+    return store_info
+
+def get_product_info(path):
+
+    #product info
+    product_info = impala_query(f"""
+    select item_idnt as item_code,
+            item_desc,
+            sbclass_desc,
+            item_brand
+    from {path}
+    """)
+
+    product_info['item_code'] = product_info['item_code'].apply(pd.to_numeric)
+    return product_info
+
+def get_outlier(df,store,item,work_day,quantity):
+    
+    start_dt = work_day - pd.Timedelta(days=7)
+    end_dt = work_day + pd.Timedelta(days=7)
+    tmp = df[(df.store_id==store)&(df.item_code==item)&(df.day_dt>=start_dt)&(df.day_dt<=end_dt)&(df.ttl_quantity<=200)]
+    all_quantity = tmp.ttl_quantity.sum()
+    if quantity / all_quantity > 1:
+        return all_quantity/len(tmp)
+    else:
+        return quantity
+
+def getsaletable(item, path):
+
+    data = impala_query(
+    f"select * from {path} where item_code = '{str(item)}'"
+    )
+
+    data['day_dt'] = pd.to_datetime(data['day_dt'])
+    data[['item_code','store_id','ttl_quantity','avg_amountofsales','ttl_amt_payment']] = data[['item_code','store_id','ttl_quantity','avg_amountofsales','ttl_amt_payment']].apply(pd.to_numeric)
+    outlier_df = data[data.ttl_quantity>=200]
+    if len(outlier_df) == 0:
+        return data
+    else:
+        outlier_df['sale_qty2'] = outlier_df.apply(lambda x:get_outlier(data,x.store_id,x.item_code,x.day_dt,x.ttl_quantity),axis=1)
+        outlier_df['sale_qty2'] = outlier_df['sale_qty2'].fillna(0.0).apply(lambda x:int(np.ceil(x)))
+        outlier_df = outlier_df.drop(['ttl_quantity','avg_amountofsales','ttl_amt_payment'],axis=1)
+        data = pd.merge(data,outlier_df,how='left',on=['store_id','day_dt','item_code'])
+        data['sale_qty2'] = data['sale_qty2'].fillna(data['ttl_quantity'])
+        data = data.drop(['ttl_quantity'],axis=1).rename({'sale_qty2':'ttl_quantity'},axis=1)
+        if data[['store_id','item_code','day_dt']].duplicated().any() == True:
+            print(f"ALERT>>>>>>>>>>>>>>> DUPLICATES!!!")
+        
+        return data
+
+def get_prom(item:str, data:pd.DataFrame, prom_info:pd.DataFrame, date_range:tuple):
+    """
+    Parameters:
+        item: item code (string)
+        data: merged data from previous steps
+        prom_info: prom_info data
+        date_range: 2 dates for date range (tuple)
+    Returns:
+        data: data with promotion information merged to it
+    """
+    # GET PROM INFO
+    # if item not in list(prom_info.item.unique()):
+    #     print("ITEM NOT IN PROM_INFO DATA >>>>>>>>>>>>>>>>>>>>")
+    #     return None
+
+    prom_info = prom_info[prom_info['item'] == item]
+
+    # CREATE TIME RANGE DATAFRAME FOR CROSS JOIN
+    time_range = pd.date_range(*date_range)
+    time_merge = pd.DataFrame()
+    time_merge['day_dt'] = time_range
+    cross_join_prom = cartesian_product_basic(time_merge, prom_info)
+    cross_join_prom = cross_join_prom[(cross_join_prom['day_dt'] >= cross_join_prom['offer_start_date']) & (
+            cross_join_prom['day_dt'] <= cross_join_prom['offer_end_date'])]
+
+    # REMOVE DUPLICATE UNIT PRICES - TAKE THE SMALLEST
+    cross_join_prom['p_rate'] = 1 - cross_join_prom['unit_price'] / cross_join_prom['retail_price']
+    cross_join_prom.loc[cross_join_prom['p_rate'] < 0, 'p_rate'] = 0
+    cross_join_prom = cross_join_prom.sort_values(['item', 'day_dt', 'unit_price'])
+    cross_join_prom = cross_join_prom.groupby(['day_dt', 'item']).first().reset_index()
+    cross_join_prom['day_dt'] = pd.to_datetime(cross_join_prom['day_dt'], errors='coerce')
+
+    # print(data[['day_dt','item_code']].dtypes)
+    # print(cross_join_prom[['day_dt','item']].dtypes)
+    
+    # MERGE CROSS JOIN PROM AND DATA
+    data['item_code'] = data['item_code'].astype(str)
+    cross_join_prom['item'] = cross_join_prom['item'].astype(str)
+    data['day_dt'] = pd.to_datetime(data['day_dt'])
+    cross_join_prom['day_dt'] = pd.to_datetime(cross_join_prom['day_dt'])
+    data = data.merge(cross_join_prom, left_on=['day_dt', 'item_code'], right_on=['day_dt', 'item'], how='left')
+    data = data.drop(['item','offer_start_date', 'offer_end_date','outputs'], axis=1)
+    
+    # IMPUTE DATA
+    data['retail_price'] = data['retail_price'].fillna(data['retail_price'].median())
+    prom_types = ['x件y折', 'x元y件', '加x元多y件', '买x送y', '满x减y', 'x件减y', '第x件y折', '换购', 'is_vip', 'free_gift']
+    data[prom_types] = data[prom_types].fillna(0)
+    data['required_num'] = data['required_num'].fillna(1)
+    data['p_rate'] = data['p_rate'].fillna(0)
+    data.loc[data['amount'].isna(), 'amount'] = data.loc[data['amount'].isna(), 'retail_price']
+    data.loc[data['prom_price'].isna(), 'prom_price'] = data.loc[data['prom_price'].isna(), 'retail_price']
+    data.loc[data['unit_price'].isna(), 'unit_price'] = data.loc[data['unit_price'].isna(), 'prom_price']
+    # if data.unit_price.isna().mean() == 1:
+    #     print("UNIT PRICE IS NULL, GET PROM NOT MERGED CORRECTLY.")
+    # if data.duplicated().any() == True:
+    #     print(f"ALERT>>>>>>>>>>>>>>>> DUPLICATES!!!")
+
+    return data
+
+def export_corr_matrix(df:pd.DataFrame, export_path:str):
+    """
+    df - dataframe for 1 item
+    export_path - 'path/example.csv'
+    """
+    # GET ITEM CODE
+    item_code = str(df.item_code[0])
+
+    # SELECT NUMERICAL FEATURES
+    df['deal_price'] = df['ttl_amt_payment'] / df['ttl_quantity']
+    df = df[['ttl_quantity','is_5th','weekday','day_type','deal_price',
+            'x件y折', 'x元y件', '加x元多y件', '买x送y', '满x减y', 'x件减y', 
+            '第x件y折', '换购', 'is_vip', 'free_gift','required_num','amount',
+            'prom_price','unit_price', 'retail_price','p_rate','loc_selling_area',
+            'year','month']]
+    df.fillna(0,inplace=True)
+
+    df['loc_selling_area'] = df['loc_selling_area'].astype(float)
+    df['year'] = df.year.astype(object)
+    df['month'] = df.month.astype(object)
+    df = pd.get_dummies(df)
+
+    # FIND TOP 10 FEATURES CORRELATED TO TTL_QUANTITY
+    top_features = df.corr()['ttl_quantity'].apply(lambda x: abs(x)).sort_values(ascending=False)[:10].index
+
+    # CREATE JSON AND EXPORT TO CSV
+    df = df[top_features]
+    corr_values = df.corr().fillna(0).values.tolist()
+    corr_json = {}
+    corr_json['col_name'] = list(df.columns)
+    corr_json['data'] = corr_values
+    json_string = str(corr_json).replace(' ','')
+    res_csv = pd.DataFrame({'item':[item_code], 'corr_json':[json_string]})
+    res_csv.to_csv(export_path,header=False,index=False,sep='|')
+
+def main(item:str, period:str):
+
+    try_again = True
+
+    while try_again:
+        try:
+            # Load data
+            print(f"IMPORTING ITEM {item} AT {now()}______________________________________________________________________________________")
+            print(f"Loading POG data...")
+            if period == '2021-04-15':
+                pog_df = gen_pog_and_date(item=item,
+                                        date_feature=date_feature,
+                                        pog_path='scai.0415_0512_pog')
+            elif period == '2021-03-18':
+                pog_df = gen_pog_and_date(item=item,
+                        date_feature=date_feature,
+                        pog_path='scai.0318_0414_pog')
+            elif period == '2021-01-28':
+                pog_df = gen_pog_and_date(item=item,
+                        date_feature=date_feature,
+                        pog_path='scai.0128_0317_pog')
+            elif period == '2021-01-07':
+                pog_df = gen_pog_and_date(item=item,
+                        date_feature=date_feature,
+                        pog_path='scai.pog_top500')
+            else:
+                print(f"UNSEEN PERIOD {period}>>>")
+                return None
+
+            print(f"Loading sales data...")
+            if period == '2021-04-15':
+                sales_df = getsaletable(item=item, path='scai.0415_0512_item_sales')
+            elif period == '2021-03-18':
+                sales_df = getsaletable(item=item, path='scai.0318_0414_item_sales')
+            elif period == '2021-01-28':
+                sales_df = getsaletable(item=item, path='scai.0128_0317_item_sales')
+            elif period == '2021-01-07':
+                sales_df = getsaletable(item=item, path='scai.top500_sales')
+            else:
+                print(f"UNSEEN PERIOD {period}>>>")
+                return None
+
+            print(f"Merging POG, store, product, and sales data...")
+            df = pog_df.merge(store_df,on='store_id',how='inner')
+            df['item_code'] = df['item_code'].astype(int)
+            df['store_id'] = df['store_id'].astype(int)
+            sales_df['item_code'] = sales_df['item_code'].astype(int)
+            sales_df['store_id'] = sales_df['store_id'].astype(int)
+            df = df.merge(sales_df,on=['item_code','store_id','day_dt'],how='left')
+            df = df.merge(product_df,on=['item_code'],how='left')
+
+            print(f"Merging promotions data...")
+            res_df = get_prom(item=item, data=df, prom_info=prom_info, date_range=('2019-01-01', '2021-07-28'))
+            
+            print(f"EXPORTING CORRELATION MATRIX TO {export_path}")
+            export_corr_matrix(df=res_df, export_path=f"{export_path}{item}_corr_matrix.csv")
+            print(f"CORR MATRIX EXPORTED AT {now()}")
+            
+            try_again=False
+
+        except:
+            traceback.print_exc()
+            time.sleep(5)
+            try_again=True
+            print(f"TRY TO CONNECT TO IMPALA AGAIN IN 5 SECONDS...")
+
+#* DEFINE EXPORT PATH
+export_path = '/app/python-scripts/kevin_workspace/corr_output_v2/'
+log_path = '/app/python-scripts/kevin_workspace/corr_output_v2/log/'
+
+# LOAD FIXED DATA
+print(f"Loading date_feature, prom_info, store_df, product_df at {now()}")
+date_feature = get_datefeature(path='/app/python-scripts/data/date_feature.csv')
+prom_info = get_prominfo()
+store_df = get_store_info(path='ods_sc.dim_organization')
+product_df = get_product_info(path='ods_sc.dim_product')
+
+# GET ITEM LIST
+items_df = pd.read_csv('./assist_data/corr_items.csv')
+exported_items = [i[:i.index('_')] for i in os.listdir("/app/python-scripts/kevin_workspace/corr_output_v2/") if i.endswith('.csv')]
+items_df = items_df[~items_df.item_id.isin(exported_items)]
+items_df.item_id = items_df.item_id.astype(str)
+
+# items_df = items_df[items_df.item_id == '101147231']
+item_dict = dict(zip(items_df.item_id, items_df.start))
+
+# MAKE IT A LIST OF STRINGS
+print(f"START ETL FOR CORR MATRIX FOR {len(item_dict.keys())} ITEMS, ITEM LIST: {list(item_dict.keys())} AT {now()}")
+
+for item, period in item_dict.items():
+    main(item=item, period=period)
+
+print(f"PROGRAM COMPLETED AT {now()}")
