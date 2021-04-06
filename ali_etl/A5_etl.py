@@ -84,6 +84,8 @@ def gen_pog_and_date(item, pog_path, test_period):
     data.drop(columns=['wk_idnt'], inplace=True)
     data.drop_duplicates(inplace=True)
 
+    data = data[['store_id','item_code', 'day_dt','day_type', 'activity_desc', 'mday', 'yday', 'year', 'month', 'weekday', 'is_5th', 'last_day_type']]
+
     return data
 
 def get_store_info(path):
@@ -128,6 +130,7 @@ def getsaletable(item, path):
         data = pd.merge(data,outlier_df,how='left',on=['store_id','day_dt','item_code'])
         data['sale_qty2'] = data['sale_qty2'].fillna(data['ttl_quantity'])
         data = data.drop(['ttl_quantity'],axis=1).rename({'sale_qty2':'ttl_quantity'},axis=1)
+        data.drop_duplicates()
         if data[['store_id','item_code','day_dt']].duplicated().any() == True:
             print(f"ALERT>>>>>>>>>>>>>>> DUPLICATES!!!")
         
@@ -152,8 +155,7 @@ def get_prom(item, data, prom_info, date_range):
     time_merge = pd.DataFrame()
     time_merge['day_dt'] = time_range
     cross_join_prom = cartesian_product(time_merge, prom_info)
-    cross_join_prom = cross_join_prom[(cross_join_prom['day_dt'] >= cross_join_prom['offer_start_date']) & (
-            cross_join_prom['day_dt'] <= cross_join_prom['offer_end_date'])]
+    cross_join_prom = cross_join_prom[(cross_join_prom['day_dt'] >= cross_join_prom['offer_start_date']) & (cross_join_prom['day_dt'] <= cross_join_prom['offer_end_date'])]
 
     # REMOVE DUPLICATE UNIT PRICES - TAKE THE SMALLEST
     cross_join_prom['p_rate'] = 1 - cross_join_prom['unit_price'] / cross_join_prom['retail_price']
@@ -176,8 +178,7 @@ def get_prom(item, data, prom_info, date_range):
     data.loc[data['prom_price'].isna(), 'prom_price'] = data.loc[data['prom_price'].isna(), 'retail_price']
     data.loc[data['unit_price'].isna(), 'unit_price'] = data.loc[data['unit_price'].isna(), 'prom_price']
     if data.unit_price.isna().mean() == 1: print("UNIT PRICE IS NULL, GET PROM NOT MERGED CORRECTLY >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
-    if data.duplicated().any() == True:
-        print(f"ALERT>>>>>>>>>>>>>>>> DUPLICATES!!!")
+    data.drop_duplicates(inplace=True)
 
     return data
 
@@ -189,7 +190,7 @@ def encrypt_data(df):
 
         mapper = mapper_df[mapper_df.code_type == feat][['key_id','value_id']]
         mapper.rename({'key_id':feat+'_new','value_id':feat},axis=1,inplace=True)
-        df.merge(mapper, how='left', on=feat)
+        df = df.merge(mapper, how='left', on=feat)
         df.drop(feat,axis=1,inplace=True)
 
     return df
@@ -210,11 +211,29 @@ def main(item):
 
     print(f"MERGING DATA...")
     df = pog_df.merge(store_info,on='store_id',how='inner')
+
     df.item_code, sales_df.item_code = df.item_code.astype(str), sales_df.item_code.astype(str)
     df = df.merge(sales_df,on=['item_code','store_id','day_dt'],how='left')
     res_df = get_prom(item=item, data=df, prom_info=prom_info, date_range=(test_start, test_end))
     res_df = res_df[res_df.day_dt >= '2019-01-01']
 
+    print('ADDING NUM ITEMS IN OFFER CODE...')
+    num_item_by_offer = prom_info.groupby(['offer_code']).item.nunique().to_frame().reset_index()
+    num_item_by_offer.rename({'item':'num_items_in_offer'},axis=1,inplace=True)
+    res_df = res_df.merge(num_item_by_offer, how='left', on='offer_code')
+    res_df.num_items_in_offer.fillna(100,inplace=True)
+
+    print('ADDING NEW UNIT PRICE...')
+    res_df.item_code, res_df.area_idnt = res_df.item_code.astype(str), res_df.area_idnt.astype(int)
+    unit_price.item_code, unit_price.area_idnt = unit_price.item_code.astype(str), unit_price.area_idnt.astype(int)
+    res_df = res_df.merge(unit_price, on=['item_code','area_idnt','day_dt'], how='left', indicator=True)
+    if 'both' not in res_df._merge.astype(str).unique(): print('NO UNIT PRICE DATA WAS MERGED >>>>>>>>>>>>>>>>>>>>>>')
+    res_df.drop(['_merge'],axis=1,inplace=True)
+    res_df['unit_price2'].fillna(res_df['unit_price'],inplace=True)
+    res_df.drop('unit_price',axis=1,inplace=True)
+    res_df.rename({'unit_price2':'unit_price'},axis=1,inplace=True)
+    
+    print('ENCRYPTING DATA...')
     res_df = encrypt_data(res_df)
 
     # Export data
@@ -226,20 +245,23 @@ def main(item):
     print(f"exported to {export_path} at {now()}")
 
 #* DEFINE EXPORT PATH
-export_path = '/app2/0326weekly/kevin_workspace/data_test10/'
-log_path = '/app2/0326weekly/kevin_workspace/log_test10/'
+export_path = '/app2/0326weekly/kevin_workspace/test/'
+log_path = '/app2/0326weekly/kevin_workspace/test/'
 
 # DEFINE TIME
 test_start, test_end = '2021-04-01', '2021-05-12'
 
 #* GET ITEM LIST
-item_list = [i[:i.index('.')] for i in os.listdir('/app2/0326weekly/data/sales/')]
+item_list = [i[:i.index('.')] for i in os.listdir('/app2/0326weekly/data/sales/')][2:4]
 
 # LOAD FIXED DATA
 print('Loading date_feature...')
 date_feature = get_datefeature(path='/app2/0326weekly/data/date_feature.csv')
 print('Loading prom_info...')
 prom_info = get_prominfo(path='/app2/0326weekly/data/promotion_info.pk')
+print('Loading unit_price...')
+unit_price = pd.read_pickle('/app2/0326weekly/data/unit_price.pk')
+unit_price.day_dt = pd.to_datetime(unit_price.day_dt)
 print('Loading store_df...')
 store_info = get_store_info(path='/app2/0326weekly/data/store_info.pk')
 print('Loading mapper_df...')
@@ -252,7 +274,6 @@ print(f"START ETL FOR {len(item_list)} ITEMS, ITEM LIST: {item_list} AT {now()}"
 for item in item_list:
     # try:
     main(item)
-
     # except:
     #     traceback.print_exc()
 
