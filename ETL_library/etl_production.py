@@ -198,14 +198,13 @@ def get_prom(item:str, data, prom_info, date_range):
     return data
 
 def encrypt_data(df):
-    # df['store_id'], df['item_code'] = df['store_id'].astype(str), df['item_code'].astype(str)
-    # for feat in ['store_id','item_code','activity_desc','store_type']:
-    #     mapper = mapper_df[mapper_df.code_type == feat][['key_id','value_id']]
-    #     mapper.rename({'key_id':feat+'_new','value_id':feat},axis=1,inplace=True)
-    #     df = df.merge(mapper, how='left', on=feat)
-    #     df.drop(feat,axis=1,inplace=True)
-    # return df
-    pass
+    df['store_id'], df['item_code'] = df['store_id'].astype(str), df['item_code'].astype(str)
+    for feat in ['store_id','item_code','activity_desc','store_type']:
+        mapper = mapper_df[mapper_df.code_type == feat][['key_id','value_id']]
+        mapper.rename({'key_id':feat+'_new','value_id':feat},axis=1,inplace=True)
+        df = df.merge(mapper, how='left', on=feat)
+        df.drop(feat,axis=1,inplace=True)
+    return df
 
 def add_new_features(df, item:str):
     '''
@@ -295,9 +294,9 @@ print('Loading store_info...')
 store_info = get_store_info(path=store_path)
 print('Loading product_info...')
 product_info = pd.read_pickle('/app2/0326weekly/data/product_info.pk')
-# print('Loading mapper_df...')
-# mapper_df = pd.read_pickle('/app2/0326weekly/data/feature_map.pk')
-# mapper_df.code_type.replace({'loc_idnt':'store_id','item_idnt':'item_code'},inplace=True)
+print('Loading mapper_df...')
+mapper_df = pd.read_pickle('/app2/0326weekly/data/feature_map.pk')
+mapper_df.code_type.replace({'loc_idnt':'store_id','item_idnt':'item_code'},inplace=True)
 
 # START ETL PROCESS
 print(f"START ETL FOR {len(item_list)} ITEMS, ITEM LIST: {item_list} AT {now()}")
