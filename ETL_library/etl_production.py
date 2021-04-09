@@ -205,7 +205,7 @@ def encrypt_data(df):
         df = df.merge(mapper, how='left', on=feat)
         df.drop(feat,axis=1,inplace=True)
     return df
-
+    
 def add_new_features(df, item:str):
     '''
     ADD NEW FEATURES:
