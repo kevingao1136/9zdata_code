@@ -5,11 +5,8 @@ import os
 import tarfile
 import pexpect
 
-today = pd.Timestamp.now().strftime('%Y%m%d')
-feature_path = '/app2/feature_pipeline/feature_classified'
-# new_itemlist_path = f'/app2/feature_pipeline/data/item/items_classified{today}.pk'
-new_itemlist_path = '/app2/feature_pipeline/data/item/items_classified20210421.pk'
-tar_file_path = f'/app2/upload/A5_data_{today}.tar'
+def today():
+    return pd.Timestamp.now().strftime('%Y%m%d')
 
 def get_tar():
 
@@ -41,18 +38,28 @@ def scp_to38():
     child.expect(f"bbmprd@10.82.20.38's password:")
     child.sendline("CYB4QBOgX5")
     child.expect(pexpect.EOF, timeout=None)
+    os.system(f"mv {tar_file_path} /app2/upload/processed")
 
+print('WAITING FOR 23:00...')
 while True:
 
-    print(f"CHECKING CURRENT TIME AT {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    now = pd.Timestamp.now().strftime('%H:%M:%S')
-    time.sleep(10)
+    feature_path = '/app2/feature_pipeline/feature_classified'
+    new_itemlist_path = f'/app2/feature_pipeline/data/item/items_classified{today()}.pk'
+    tar_file_path = f'/app2/upload/A5_data_{today()}.tar'
 
-    if now[:5] == '23:30':
+    now = pd.Timestamp.now().strftime('%H:%M')
+
+    if now == '23:30':
+        
         print(f"ZIPPING FEATURES AT {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}")
         get_tar()
+
+        print('START TO SCP TO 38...')
         scp_to38()
-        print('SCP COMPLETE, SCAN AGAIN IN 23 HOURS...')
-        time.sleep(82800)
+
+        print('START SCANNING AGAIN IN 23 HOURS...')
+        time.sleep(82800) #SLEEP 23 HOURS
+
+    time.sleep(1)
 
 # %%
