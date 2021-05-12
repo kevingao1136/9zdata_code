@@ -17,7 +17,7 @@ result_data_path = '/app/auto_pipeline_main/output/result_data'
 meta_data_path = '/app/auto_pipeline_main/output/meta_data'
 work_space_path = '/app/auto_pipeline_main'
 data_path_to_remove = '/app/auto_pipeline_main/app'
-completed_path = '/app/auto_pipeline_main/output/completed.csv'
+completed_path = '/app/auto_pipeline_main/output'
 
 def unzip_tar():
     '''
@@ -66,7 +66,8 @@ while True:
         unzip_tar()
         #--------------------------------------------------------------------------------------------------------------------------------
         print('START TRAINING MODEL...')
-        os.system('nohup python -u /app/auto_pipeline_main/train_model.py >> /app/auto_pipeline_main/output/log/meta_train.log 2>&1&')
+        os.system('nohup python -u /app/auto_pipeline_main/train_model.py > /app/auto_pipeline_main/output/log/meta_train.log 2>&1&')
+
         print('KEEP SCANNING FOR TAR FILE EVERY SECOND...')
 
     time.sleep(1)
